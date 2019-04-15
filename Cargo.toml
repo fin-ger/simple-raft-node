@@ -1,5 +1,5 @@
 [package]
-name = "raft-test"
+name = "simple-raft-node"
 version = "0.1.0"
 authors = ["Fin Christensen <christensen.fin@gmail.com>"]
 edition = "2018"
