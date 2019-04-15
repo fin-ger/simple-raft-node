@@ -1,0 +1,12 @@
+[package]
+name = "raft-test"
+version = "0.1.0"
+authors = ["Fin Christensen <christensen.fin@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+protobuf = "~2.0-2.2"
+raft = "~0"
+regex = "~1"
+env_logger = "~0"
+log = "~0"
