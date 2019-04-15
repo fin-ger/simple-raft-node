@@ -3,4 +3,4 @@ This repository contains a wrapper for the raft-rs crate providing a simple inte
 
 > This project is highly work-in-progress
 
-For now, read the source to get started. This readme will be helpful later on :shh:
+For now, read the source to get started. This readme will be helpful later on :neckbeard: :dizzy_face:
