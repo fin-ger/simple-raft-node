@@ -15,16 +15,20 @@
 mod proposals;
 mod node_core;
 mod transport;
+mod serde_polyfill;
+mod transports;
+
+pub use transport::{Transport, TransportItem, TransportError};
 
 use std::collections::{HashMap};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use log::{info, error};
+use raft::Config;
 
 use proposals::{Proposal, Answer};
 use node_core::NodeCore;
-use transport::TransportItem;
 
 fn main() {
     env_logger::init();
@@ -52,7 +56,7 @@ fn main() {
     // Put 5 key-value pairs.
     (0..5u64)
         .filter(|i| {
-            let proposal = Proposal::state_change(*i, *i as u16, "hello, world".to_string());
+            let proposal = Proposal::state_change(*i, *i as u16, format!("hello, world {}", *i));
             info!("Adding new proposal {}...", i);
             let res = nodes[0].propose(proposal);
             info!("Proposal {} was {}", i, res);
@@ -79,10 +83,15 @@ impl AsyncSimpleNode {
     ) -> Self {
         let (proposals_tx, proposals_rx) = mpsc::channel();
         let (answers_tx, answers_rx) = mpsc::channel();
-        let node = NodeCore::new(id, my_mailbox, mailboxes, proposals_rx, answers_tx);
+        let config = Config {
+            election_tick: 10,
+            heartbeat_tick: 3,
+            ..Default::default()
+        };
+        let node = NodeCore::new(format!("node_{}", id), config, my_mailbox, mailboxes, proposals_rx, answers_tx).unwrap();
         // Here we spawn the node on a new thread and keep a handle so we can join on them later.
         let handle = thread::spawn(|| {
-            node.run();
+            node.run().unwrap();
         });
 
         Self {

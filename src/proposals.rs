@@ -1,6 +1,8 @@
 use std::convert::{TryInto, TryFrom};
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use raft::{eraftpb::ConfChange, RawNode};
+
+use crate::serde_polyfill::ConfChangePolyfill;
 
 #[derive(Serialize, Deserialize)]
 pub struct Context {
@@ -29,12 +31,14 @@ impl TryFrom<&[u8]> for Context {
  *  - replace bincode with protobuf
  */
 
+#[derive(Serialize, Deserialize)]
 enum ProposalKind {
     StateChange(u16, String),
-    ConfChange(ConfChange),
+    ConfChange(#[serde(with = "ConfChangePolyfill")] ConfChange),
     TransferLeader(u64),
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Proposal {
     context: Context,
     kind: ProposalKind,
@@ -104,6 +108,7 @@ impl Proposal {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Answer {
     pub id: u64,
     pub value: bool,

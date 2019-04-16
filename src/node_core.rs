@@ -1,22 +1,66 @@
 use std::collections::{HashMap};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 use std::thread;
 use std::convert::TryInto;
-use std::fmt::Debug;
 
 use protobuf::Message as PbMessage;
 use raft::{StateRole, RawNode, Config, storage::MemStorage};
 use raft::eraftpb::{Message, MessageType, EntryType, ConfChange, ConfChangeType};
 use regex::Regex;
-use log::{info, warn, error};
+use log::{info, warn};
+use failure::Fail;
+use lazy_static::lazy_static;
 
 use crate::proposals::{Proposal, Answer, Context};
 use crate::transport::TransportItem;
 
+#[derive(Debug, Fail)]
+pub enum NodeCoreError {
+    #[fail(display = "The name must end with a number that identifies the node: {}", name)]
+    NoIdInName {
+        name: String,
+    },
+    #[fail(display = "The given id in the name could not be parsed to u64: {}", name)]
+    InvalidIdInName {
+        name: String,
+        #[cause]
+        cause: <u64 as std::str::FromStr>::Err,
+    },
+    #[fail(display = "A raft operation failed")]
+    Raft {
+        #[cause]
+        cause: raft::Error,
+    },
+    #[fail(display = "Failed to deliver answer for proposal on node {}", node_name)]
+    AnswerDelivery {
+        node_name: String,
+        #[cause]
+        cause: mpsc::SendError<Answer>,
+    },
+    #[fail(display = "Failed to forward proposal to leader on node {}", node_name)]
+    ProposalForwarding {
+        node_name: String,
+        #[cause]
+        cause: mpsc::SendError<TransportItem>,
+    },
+    #[fail(display = "Failed to append to storage")]
+    StorageAppend {
+        #[cause]
+        cause: raft::Error,
+    },
+}
+
+type Result<T> = std::result::Result<T, NodeCoreError>;
+
+lazy_static! {
+    static ref ID_RE: Regex = Regex::new("^.*(\\d+)$").unwrap();
+}
+
 pub struct NodeCore {
-    id: u64,
+    name: String,
     // None if the raft is not initialized.
+    base_config: Config,
     raft_group: Option<RawNode<MemStorage>>,
     my_mailbox: Receiver<TransportItem>,
     mailboxes: HashMap<u64, Sender<TransportItem>>,
@@ -28,7 +72,6 @@ pub struct NodeCore {
 
 /*
  * TODO:
- *  - cleanup config handling
  *  - replace bincode with protobuf
  *  - add state change type and remove regex
  *  - add state machine type and replace hashmap
@@ -38,26 +81,52 @@ pub struct NodeCore {
 
 impl NodeCore {
     // Create a raft leader only with itself in its configuration.
-    pub fn new(
-        id: u64,
+    pub fn new<StringLike: Into<String>>(
+        name: StringLike,
+        base_config: Config,
         my_mailbox: Receiver<TransportItem>,
         mailboxes: HashMap<u64, Sender<TransportItem>>,
         proposals: Receiver<Proposal>,
+
         answers: Sender<Answer>,
-    ) -> Self {
-        let cfg = Config {
-            election_tick: 10,
-            heartbeat_tick: 3,
-            id,
-            peers: vec![1, 2, 3, 4, 5],
-            tag: format!("peer_{}", id),
-            ..Default::default()
+    ) -> Result<Self> {
+        let string_name = name.into();
+        let id = match ID_RE.captures(&string_name) {
+            Some(caps) => {
+                caps
+                    .get(1)
+                    .unwrap()
+                    .as_str()
+                    .parse::<u64>()
+                    .map_err(|e| NodeCoreError::InvalidIdInName {
+                        name: string_name.clone(),
+                        cause: e,
+                    })?
+            },
+            None => {
+                return Err(NodeCoreError::NoIdInName {
+                    name: string_name,
+                });
+            },
         };
 
-        let storage = Default::default();
-        let raft_group = Some(RawNode::new(&cfg, storage, vec![]).unwrap());
-        Self {
+        let cfg = Config {
             id,
+            tag: string_name.clone(),
+            ..base_config.clone()
+        };
+
+        let storage = MemStorage::new_with_conf_state(
+            (mailboxes.keys().map(|i| *i).collect::<Vec<_>>(), vec![])
+        );
+        let raft_group = Some(
+            RawNode::new(&cfg, storage)
+                .map_err(|e| NodeCoreError::Raft { cause: e })?
+        );
+
+        Ok(Self {
+            name: string_name,
+            base_config,
             raft_group,
             my_mailbox,
             mailboxes,
@@ -65,13 +134,13 @@ impl NodeCore {
             proposals,
             answers,
             machine: Default::default(),
-        }
+        })
     }
 
     // Initialize raft for followers.
-    fn initialize_raft_from_message(&mut self, msg: &Message) {
+    fn initialize_raft_from_message(&mut self, msg: &Message) -> Result<()> {
         if self.raft_group.is_some() {
-            return;
+            return Ok(());
         }
 
         // if not initial message
@@ -79,32 +148,42 @@ impl NodeCore {
         if msg_type != MessageType::MsgRequestVote
             && msg_type != MessageType::MsgRequestPreVote
             && !(msg_type == MessageType::MsgHeartbeat && msg.get_commit() == 0) {
-                return;
+                return Ok(());
             }
 
         let id = msg.get_to();
+        // FIXME: name and id may be out-of-sync
+        // TODO: check if this code is really needed
         let cfg = Config {
-            election_tick: 10,
-            heartbeat_tick: 3,
             id,
-            tag: format!("peer_{}", id),
-            ..Default::default()
+            tag: self.name.clone(),
+            ..self.base_config.clone()
         };
         let storage = Default::default();
-        self.raft_group = Some(RawNode::new(&cfg, storage, vec![]).unwrap());
+        self.raft_group = Some(
+            RawNode::new(&cfg, storage)
+                .map_err(|e| NodeCoreError::Raft {
+                    cause: e,
+                })?
+        );
+
+        Ok(())
     }
 
     // Step a raft message, initialize the raft if need.
-    fn step(&mut self, msg: Message) {
-        self.initialize_raft_from_message(&msg);
+    fn step(&mut self, msg: Message) -> Result<()> {
+        self.initialize_raft_from_message(&msg)?;
         self.raft_group
             .as_mut()
+            // this option will never be `None` as it gets initialized above
             .unwrap()
             .step(msg)
-            .unwrap();
+            .map_err(|e| NodeCoreError::Raft {
+                cause: e,
+            })
     }
 
-    pub fn run(mut self) {
+    pub fn run(mut self) -> Result<()> {
         // Tick the raft node per 100ms. So use an `Instant` to trace it.
         let mut t = Instant::now();
         let mut proposals = Vec::new();
@@ -115,7 +194,7 @@ impl NodeCore {
             loop {
                 // step raft messages and save forwarded proposals
                 match self.my_mailbox.try_recv() {
-                    Ok(TransportItem::Message(msg)) => self.step(msg),
+                    Ok(TransportItem::Message(msg)) => self.step(msg)?,
                     Ok(TransportItem::Proposal(p)) => proposals.push(p),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break 'cycle,
@@ -163,10 +242,17 @@ impl NodeCore {
                         // if applying was not successful, tell the client
                         // FIXME: this is broken when proposal was forwarded as node_id of
                         //        proposal is not ours
-                        self.answers.send(Answer {
+                        let answer = Answer {
                             id,
                             value: false,
-                        }).unwrap();
+                        };
+                        let name = self.name.clone();
+                        self.answers
+                            .send(answer)
+                            .map_err(|e| NodeCoreError::AnswerDelivery {
+                                node_name: name,
+                                cause: e,
+                            })?;
                     }
                 }
             } else {
@@ -176,7 +262,11 @@ impl NodeCore {
                         // forward proposals to leader
                         for proposal in proposals.drain(..) {
                             let id = proposal.id();
-                            leader.send(TransportItem::Proposal(proposal)).unwrap();
+                            leader.send(TransportItem::Proposal(proposal))
+                                .map_err(|e| NodeCoreError::ProposalForwarding {
+                                    node_name: self.name.clone(),
+                                    cause: e,
+                                })?;
                             // proposal was forwarded and can therefore be put in our proposed
                             // list to prepare for client answer
                             self.proposed.push(id);
@@ -190,24 +280,25 @@ impl NodeCore {
             }
 
             // handle readies from the raft.
-            self.on_ready();
+            self.on_ready()?;
         }
 
         // print key-value store (machine) for debug purposes
         // FIXME: remove when debugging done
-        info!("[{}] {:#?}", self.id, self.machine);
+        info!("[{}] {:#?}", self.name, self.machine);
+
+        Ok(())
     }
 
-    fn on_ready(&mut self) {
-        // FIXME: return should never be reached
+    fn on_ready(&mut self) -> Result<()> {
         let raft_group = match self.raft_group {
             Some(ref mut raft_group) => raft_group,
-            None => return,
+            None => unreachable!(),
         };
 
         // if raft is not initialized, return
         if !raft_group.has_ready() {
-            return;
+            return Ok(());
         }
 
         // get the `Ready` with `RawNode::ready` interface.
@@ -215,11 +306,11 @@ impl NodeCore {
 
         // persistent raft logs. It's necessary because in `RawNode::advance` we stabilize
         // raft logs to the latest position.
-        if let Err(e) = raft_group.raft.raft_log.store.wl().append(ready.entries()) {
-            // FIXME: handle
-            error!("persist raft log fail: {:?}, need to retry or panic", e);
-            return;
-        }
+        raft_group.raft.raft_log.store.wl()
+            .append(ready.entries())
+            .map_err(|e| NodeCoreError::StorageAppend {
+                cause: e,
+            })?;
 
         // send out the messages from this node
         for msg in ready.messages.drain(..) {
@@ -239,6 +330,7 @@ impl NodeCore {
                 if let EntryType::EntryConfChange = entry.get_entry_type() {
                     // apply configuration changes
                     let mut cc = ConfChange::new();
+                    // TODO: add error handling
                     cc.merge_from_bytes(entry.get_data()).unwrap();
                     let node_id = cc.get_node_id();
                     match cc.get_change_type() {
@@ -278,8 +370,10 @@ impl NodeCore {
                 }
             }
         }
-        
+
         // call `RawNode::advance` interface to update position flags in the raft.
         raft_group.advance(ready);
+
+        Ok(())
     }
 }

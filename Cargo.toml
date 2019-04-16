@@ -5,11 +5,16 @@ authors = ["Fin Christensen <christensen.fin@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-protobuf = "~2.0-2.2"
-raft = "~0"
+protobuf = "~2.1-2.2"
+raft = { git = "https://github.com/pingcap/raft-rs", branch = "master" }
 regex = "~1"
 env_logger = "~0"
 log = "~0"
-serde = "~1"
-serde_derive = "~1"
+serde = { version = "~1", features = ["derive"] }
 bincode = "~1"
+failure = "~0"
+lazy_static = "~1"
+
+[build-dependencies]
+protoc-rust = "~2"
+glob = "~0"
