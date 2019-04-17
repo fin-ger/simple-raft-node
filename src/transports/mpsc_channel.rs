@@ -12,25 +12,15 @@ pub struct MpscChannelTransport {
 
 impl MpscChannelTransport {
     pub fn create_transports(node_ids: Vec<u64>) -> HashMap<u64, Vec<Self>> {
-        let mut map = HashMap::new();
-        let mut channels = HashMap::new();
-
-        for src in &node_ids {
-            channels.insert(*src, Vec::new());
-            map.insert(*src, Vec::new());
-
-            for dest in &node_ids {
-                if src != dest {
-                    channels.get_mut(src).unwrap().push(mpsc::channel());
-                }
-            }
-        }
+        let mut map: HashMap<_, _> = node_ids.iter()
+            .map(|i| (*i, Vec::new()))
+            .collect();
 
         for src in &node_ids {
             for dest in node_ids.iter().skip(*src as usize) {
                 if src != dest {
-                    let src_channel = channels.get_mut(src).unwrap().pop().unwrap();
-                    let dest_channel = channels.get_mut(dest).unwrap().pop().unwrap();
+                    let src_channel = mpsc::channel();
+                    let dest_channel = mpsc::channel();
 
                     map.get_mut(src).unwrap().push(Self {
                         src: *src,

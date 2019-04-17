@@ -13,7 +13,7 @@ use failure::Fail;
 use lazy_static::lazy_static;
 
 use crate::proposals::{Proposal, Answer, Context};
-use crate::transport::TransportItem;
+use crate::transport::{TransportItem, Transport, TransportError};
 
 #[derive(Debug, Fail)]
 pub enum NodeCoreError {
@@ -42,7 +42,7 @@ pub enum NodeCoreError {
     ProposalForwarding {
         node_name: String,
         #[cause]
-        cause: mpsc::SendError<TransportItem>,
+        cause: TransportError,
     },
     #[fail(display = "Failed to append to storage")]
     StorageAppend {
@@ -57,13 +57,12 @@ lazy_static! {
     static ref ID_RE: Regex = Regex::new("^.*(\\d+)$").unwrap();
 }
 
-pub struct NodeCore {
+pub struct NodeCore<T: Transport> {
     name: String,
     // None if the raft is not initialized.
     base_config: Config,
     raft_group: Option<RawNode<MemStorage>>,
-    my_mailbox: Receiver<TransportItem>,
-    mailboxes: HashMap<u64, Sender<TransportItem>>,
+    transports: HashMap<u64, T>,
     proposed: Vec<u64>,
     proposals: Receiver<Proposal>,
     answers: Sender<Answer>,
@@ -72,22 +71,19 @@ pub struct NodeCore {
 
 /*
  * TODO:
- *  - replace bincode with protobuf
  *  - add state change type and remove regex
  *  - add state machine type and replace hashmap
  *  - make storage configurable and remove MemStorage
  *  - replace Senders and Receivers of TransportItem with Transport trait
  */
 
-impl NodeCore {
+impl<T: Transport> NodeCore<T> {
     // Create a raft leader only with itself in its configuration.
     pub fn new<StringLike: Into<String>>(
         name: StringLike,
         base_config: Config,
-        my_mailbox: Receiver<TransportItem>,
-        mailboxes: HashMap<u64, Sender<TransportItem>>,
+        mut node_transports: Vec<T>,
         proposals: Receiver<Proposal>,
-
         answers: Sender<Answer>,
     ) -> Result<Self> {
         let string_name = name.into();
@@ -116,9 +112,19 @@ impl NodeCore {
             ..base_config.clone()
         };
 
-        let storage = MemStorage::new_with_conf_state(
-            (mailboxes.keys().map(|i| *i).collect::<Vec<_>>(), vec![])
-        );
+        let nodes: Vec<_> = node_transports.iter()
+            .map(|t| t.dest())
+            .chain(std::iter::once(id))
+            .collect();
+
+        info!("known nodes: {:#?}", nodes);
+
+        let transports = node_transports
+            .drain(..)
+            .map(|t| (t.dest(), t))
+            .collect();
+
+        let storage = MemStorage::new_with_conf_state((nodes, vec![]));
         let raft_group = Some(
             RawNode::new(&cfg, storage)
                 .map_err(|e| NodeCoreError::Raft { cause: e })?
@@ -128,8 +134,7 @@ impl NodeCore {
             name: string_name,
             base_config,
             raft_group,
-            my_mailbox,
-            mailboxes,
+            transports,
             proposed: Default::default(),
             proposals,
             answers,
@@ -187,18 +192,25 @@ impl NodeCore {
         // Tick the raft node per 100ms. So use an `Instant` to trace it.
         let mut t = Instant::now();
         let mut proposals = Vec::new();
+        let mut messages = Vec::new();
 
         'cycle: loop {
             thread::sleep(Duration::from_millis(10));
 
-            loop {
-                // step raft messages and save forwarded proposals
-                match self.my_mailbox.try_recv() {
-                    Ok(TransportItem::Message(msg)) => self.step(msg)?,
-                    Ok(TransportItem::Proposal(p)) => proposals.push(p),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break 'cycle,
+            for (_, transport) in &self.transports {
+                loop {
+                    // step raft messages and save forwarded proposals
+                    match transport.try_recv() {
+                        Ok(TransportItem::Message(msg)) => messages.push(msg),
+                        Ok(TransportItem::Proposal(p)) => proposals.push(p),
+                        Err(TransportError::Empty) => break,
+                        Err(TransportError::Disconnected) => break 'cycle,
+                    }
                 }
+            }
+
+            for msg in messages.drain(..) {
+                self.step(msg)?;
             }
 
             let raft_group = match self.raft_group {
@@ -257,7 +269,7 @@ impl NodeCore {
                 }
             } else {
                 // if we know some leader
-                match self.mailboxes.get(&raft_group.status().ss.leader_id) {
+                match self.transports.get(&raft_group.status().ss.leader_id) {
                     Some(leader) => {
                         // forward proposals to leader
                         for proposal in proposals.drain(..) {
@@ -315,7 +327,7 @@ impl NodeCore {
         // send out the messages from this node
         for msg in ready.messages.drain(..) {
             let to = msg.get_to();
-            if self.mailboxes[&to].send(TransportItem::Message(msg)).is_err() {
+            if self.transports[&to].send(TransportItem::Message(msg)).is_err() {
                 warn!("send raft message to {} fail, let raft retry it", to);
             }
         }

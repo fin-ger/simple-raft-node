@@ -18,9 +18,9 @@ mod transport;
 mod serde_polyfill;
 mod transports;
 
-pub use transport::{Transport, TransportItem, TransportError};
+pub use transport::*;
+pub use transports::*;
 
-use std::collections::{HashMap};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
@@ -33,25 +33,11 @@ use node_core::NodeCore;
 fn main() {
     env_logger::init();
 
-    info!("Setting up test");
-
-    // Create 5 mailboxes to send/receive messages. Every node holds a `Receiver` to receive
-    // messages from others, and uses the respective `Sender` to send messages to others.
-    let (mut tx_vec, mut rx_vec) = (Vec::new(), Vec::new());
-    for _ in 0..5 {
-        let (tx, rx) = mpsc::channel();
-        tx_vec.push(tx);
-        rx_vec.push(rx);
-    }
-
     info!("Spawning nodes");
-    let mut nodes = Vec::new();
-    for (i, rx) in rx_vec.into_iter().enumerate() {
-        // A map[peer_id -> sender]. In the example we create 5 nodes, with ids in [1, 5].
-        let mailboxes = (1..6u64).zip(tx_vec.iter().cloned()).collect();
-        let raft = AsyncSimpleNode::new(i as u64 + 1, rx, mailboxes);
-        nodes.push(raft);
-    }
+    let mut nodes: Vec<_> = MpscChannelTransport::create_transports(vec![1, 2, 3, 4, 5])
+        .drain()
+        .map(|(node_id, transports)| AsyncSimpleNode::new(node_id, transports))
+        .collect();
 
     // Put 5 key-value pairs.
     (0..5u64)
@@ -76,10 +62,9 @@ struct AsyncSimpleNode {
 }
 
 impl AsyncSimpleNode {
-    fn new(
+    fn new<T: Transport + 'static>(
         id: u64,
-        my_mailbox: Receiver<TransportItem>,
-        mailboxes: HashMap<u64, Sender<TransportItem>>,
+        transports: Vec<T>
     ) -> Self {
         let (proposals_tx, proposals_rx) = mpsc::channel();
         let (answers_tx, answers_rx) = mpsc::channel();
@@ -88,7 +73,13 @@ impl AsyncSimpleNode {
             heartbeat_tick: 3,
             ..Default::default()
         };
-        let node = NodeCore::new(format!("node_{}", id), config, my_mailbox, mailboxes, proposals_rx, answers_tx).unwrap();
+        let node = NodeCore::new(
+            format!("node_{}", id),
+            config,
+            transports,
+            proposals_rx,
+            answers_tx
+        ).unwrap();
         // Here we spawn the node on a new thread and keep a handle so we can join on them later.
         let handle = thread::spawn(|| {
             node.run().unwrap();
