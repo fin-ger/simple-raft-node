@@ -8,12 +8,12 @@ use protobuf::Message as PbMessage;
 use raft::{StateRole, RawNode, Config, storage::MemStorage};
 use raft::eraftpb::{Message, MessageType, EntryType, ConfChange, ConfChangeType};
 use regex::Regex;
-use log::{info, warn};
+use log::warn;
 use failure::Fail;
 use lazy_static::lazy_static;
 
 use crate::proposals::{Proposal, Answer, Context};
-use crate::transport::{TransportItem, Transport, TransportError};
+use crate::{TransportItem, Transport, TransportError, Machine};
 
 #[derive(Debug, Fail)]
 pub enum NodeCoreError {
@@ -57,33 +57,29 @@ lazy_static! {
     static ref ID_RE: Regex = Regex::new("^.*(\\d+)$").unwrap();
 }
 
-pub struct NodeCore<T: Transport> {
+pub struct NodeCore<M: Machine, T: Transport<M>> {
     name: String,
     // None if the raft is not initialized.
     base_config: Config,
     raft_group: Option<RawNode<MemStorage>>,
     transports: HashMap<u64, T>,
     proposed: Vec<u64>,
-    proposals: Receiver<Proposal>,
+    proposals: Receiver<Proposal<M>>,
     answers: Sender<Answer>,
-    machine: HashMap<u16, String>,
+    machine: M,
 }
 
-/*
- * TODO:
- *  - add state change type and remove regex
- *  - add state machine type and replace hashmap
- *  - make storage configurable and remove MemStorage
- *  - replace Senders and Receivers of TransportItem with Transport trait
- */
+// TODO: make storage configurable and remove MemStorage
 
-impl<T: Transport> NodeCore<T> {
+impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
     // Create a raft leader only with itself in its configuration.
     pub fn new<StringLike: Into<String>>(
         name: StringLike,
         base_config: Config,
+        mut machine: M,
+        storage: MemStorage,
         mut node_transports: Vec<T>,
-        proposals: Receiver<Proposal>,
+        proposals: Receiver<Proposal<M>>,
         answers: Sender<Answer>,
     ) -> Result<Self> {
         let string_name = name.into();
@@ -117,18 +113,19 @@ impl<T: Transport> NodeCore<T> {
             .chain(std::iter::once(id))
             .collect();
 
-        info!("known nodes: {:#?}", nodes);
-
         let transports = node_transports
             .drain(..)
             .map(|t| (t.dest(), t))
             .collect();
 
-        let storage = MemStorage::new_with_conf_state((nodes, vec![]));
+        storage.initialize_with_conf_state((nodes, vec![]));
+
         let raft_group = Some(
             RawNode::new(&cfg, storage)
                 .map_err(|e| NodeCoreError::Raft { cause: e })?
         );
+
+        machine.initialize(string_name.clone());
 
         Ok(Self {
             name: string_name,
@@ -138,7 +135,7 @@ impl<T: Transport> NodeCore<T> {
             proposed: Default::default(),
             proposals,
             answers,
-            machine: Default::default(),
+            machine,
         })
     }
 
@@ -252,7 +249,7 @@ impl<T: Transport> NodeCore<T> {
                         }
                     } else {
                         // if applying was not successful, tell the client
-                        // FIXME: this is broken when proposal was forwarded as node_id of
+                        // FIXME: this is broken when proposal was forwarded as node_id if
                         //        proposal is not ours
                         let answer = Answer {
                             id,
@@ -294,10 +291,6 @@ impl<T: Transport> NodeCore<T> {
             // handle readies from the raft.
             self.on_ready()?;
         }
-
-        // print key-value store (machine) for debug purposes
-        // FIXME: remove when debugging done
-        info!("[{}] {:#?}", self.name, self.machine);
 
         Ok(())
     }
@@ -353,14 +346,9 @@ impl<T: Transport> NodeCore<T> {
                             | ConfChangeType::FinalizeMembershipChange => unimplemented!(),
                     }
                 } else {
-                    // for state change proposals, extract the key-value pair and then
-                    // insert them into the machine.
-                    // TODO: use state change interface of machine here and remove regex
-                    let data = std::str::from_utf8(entry.get_data()).unwrap();
-                    let reg = Regex::new("put ([0-9]+) (.+)").unwrap();
-                    if let Some(caps) = reg.captures(&data) {
-                        self.machine.insert(caps[1].parse().unwrap(), caps[2].to_string());
-                    }
+                    // for state change proposals, tell the machine to change its state.
+                    let state_change = bincode::deserialize(entry.get_data()).unwrap();
+                    self.machine.apply(state_change);
                 }
 
                 // check if the proposal had a context attached to it
@@ -376,7 +364,7 @@ impl<T: Transport> NodeCore<T> {
                 if node_id == raft_group.raft.id && self.proposed.contains(&proposal_id) {
                     self.answers.send(Answer {
                         id: proposal_id,
-                        value: true,
+                        value: true, // self-confidence :D
                     }).unwrap();
                     self.proposed.remove_item(&proposal_id);
                 }

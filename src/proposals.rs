@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use raft::{eraftpb::ConfChange, RawNode};
 
 use crate::serde_polyfill::ConfChangePolyfill;
+use crate::Machine;
 
 #[derive(Serialize, Deserialize)]
 pub struct Context {
@@ -26,32 +27,27 @@ impl TryFrom<&[u8]> for Context {
     }
 }
 
-/* TODO:
- *  - make state change generic
- *  - replace bincode with protobuf
- */
-
 #[derive(Serialize, Deserialize)]
-enum ProposalKind {
-    StateChange(u16, String),
+enum ProposalKind<M: Machine> {
+    StateChange(M::StateChange),
     ConfChange(#[serde(with = "ConfChangePolyfill")] ConfChange),
     TransferLeader(u64),
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Proposal {
+pub struct Proposal<M: Machine> {
     context: Context,
-    kind: ProposalKind,
+    kind: ProposalKind<M>,
 }
 
-impl Proposal {
-    pub fn state_change(id: u64, key: u16, value: String) -> Self {
+impl<M: Machine> Proposal<M> {
+    pub fn state_change(id: u64, change: M::StateChange) -> Self {
         Self {
             context: Context {
                 proposal_id: id,
                 node_id: 0,
             },
-            kind: ProposalKind::StateChange(key, value),
+            kind: ProposalKind::StateChange(change),
         }
     }
 
@@ -87,12 +83,13 @@ impl Proposal {
         self.context.proposal_id
     }
 
+    // TODO: add error handling
     pub fn apply_on<T: raft::Storage>(self, raft_group: &mut RawNode<T>) -> bool {
         let last_index1 = raft_group.raft.raft_log.last_index() + 1;
         let context = self.context.try_into().unwrap();
         match self.kind {
-            ProposalKind::StateChange(ref key, ref value) => {
-                let data = format!("put {} {}", key, value).into_bytes();
+            ProposalKind::StateChange(ref change) => {
+                let data = bincode::serialize(change).unwrap();
                 raft_group.propose(context, data).unwrap();
             },
             ProposalKind::ConfChange(ref conf_change) => {

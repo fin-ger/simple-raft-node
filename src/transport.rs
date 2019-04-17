@@ -4,10 +4,11 @@ use failure::Fail;
 
 use crate::proposals::Proposal;
 use crate::serde_polyfill::MessagePolyfill;
+use crate::Machine;
 
 #[derive(Serialize, Deserialize)]
-pub enum TransportItem {
-    Proposal(Proposal),
+pub enum TransportItem<M: Machine> {
+    Proposal(Proposal<M>),
     Message(#[serde(with = "MessagePolyfill")] Message),
 }
 
@@ -22,10 +23,10 @@ pub enum TransportError {
 /**
  * This trait describes a single transport (e.g. TCP socket) to one node in the cluster.
  */
-pub trait Transport: Send {
-    fn send(&self, item: TransportItem) -> Result<(), TransportError>;
-    fn recv(&self) -> Result<TransportItem, TransportError>;
-    fn try_recv(&self) -> Result<TransportItem, TransportError>;
+pub trait Transport<M: Machine>: Send {
+    fn send(&self, item: TransportItem<M>) -> Result<(), TransportError>;
+    fn recv(&self) -> Result<TransportItem<M>, TransportError>;
+    fn try_recv(&self) -> Result<TransportItem<M>, TransportError>;
     fn src(&self) -> u64;
     fn dest(&self) -> u64;
 }

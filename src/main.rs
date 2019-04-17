@@ -11,13 +11,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #![feature(vec_remove_item)]
+#![feature(trait_alias)]
 
 mod proposals;
 mod node_core;
-mod transport;
 mod serde_polyfill;
+mod machine;
+mod machines;
+mod transport;
 mod transports;
 
+pub use machine::*;
+pub use machines::*;
 pub use transport::*;
 pub use transports::*;
 
@@ -25,10 +30,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use log::{info, error};
-use raft::Config;
+use raft::{Config, storage::MemStorage};
 
 use proposals::{Proposal, Answer};
 use node_core::NodeCore;
+
+// TODO: convert to lib and create example
 
 fn main() {
     env_logger::init();
@@ -36,13 +43,23 @@ fn main() {
     info!("Spawning nodes");
     let mut nodes: Vec<_> = MpscChannelTransport::create_transports(vec![1, 2, 3, 4, 5])
         .drain()
-        .map(|(node_id, transports)| AsyncSimpleNode::new(node_id, transports))
+        .map(|(node_id, transports)| {
+            AsyncSimpleNode::<HashMapMachine<u16, String>>::new(
+                node_id,
+                Default::default(),
+                Default::default(),
+                transports,
+            )
+        })
         .collect();
 
     // Put 5 key-value pairs.
     (0..5u64)
         .filter(|i| {
-            let proposal = Proposal::state_change(*i, *i as u16, format!("hello, world {}", *i));
+            let proposal = Proposal::state_change(*i, HashMapStateChange {
+                key: *i as u16,
+                value: format!("hello, world {}", *i),
+            });
             info!("Adding new proposal {}...", i);
             let res = nodes[0].propose(proposal);
             info!("Proposal {} was {}", i, res);
@@ -55,16 +72,19 @@ fn main() {
     }
 }
 
-struct AsyncSimpleNode {
+struct AsyncSimpleNode<M: Machine> {
     thread_handle: JoinHandle<()>,
-    proposals_tx: Sender<Proposal>,
+    proposals_tx: Sender<Proposal<M>>,
     answers_rx: Receiver<Answer>,
 }
 
-impl AsyncSimpleNode {
-    fn new<T: Transport + 'static>(
+// TODO: is 'static really needed / correct?
+impl<M: Machine + 'static> AsyncSimpleNode<M> {
+    fn new<T: Transport<M> + 'static>(
         id: u64,
-        transports: Vec<T>
+        machine: M,
+        storage: MemStorage,
+        transports: Vec<T>,
     ) -> Self {
         let (proposals_tx, proposals_rx) = mpsc::channel();
         let (answers_tx, answers_rx) = mpsc::channel();
@@ -76,9 +96,11 @@ impl AsyncSimpleNode {
         let node = NodeCore::new(
             format!("node_{}", id),
             config,
+            machine,
+            storage,
             transports,
             proposals_rx,
-            answers_tx
+            answers_tx,
         ).unwrap();
         // Here we spawn the node on a new thread and keep a handle so we can join on them later.
         let handle = thread::spawn(|| {
@@ -92,7 +114,7 @@ impl AsyncSimpleNode {
         }
     }
 
-    fn propose(&mut self, proposal: Proposal) -> bool {
+    fn propose(&mut self, proposal: Proposal<M>) -> bool {
         let id = proposal.id();
         self.proposals_tx.send(proposal).unwrap();
         let answer = self.answers_rx.recv().unwrap();

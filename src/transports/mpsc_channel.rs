@@ -1,16 +1,16 @@
 use std::sync::mpsc::{self, Sender, Receiver, TryRecvError};
 use std::collections::HashMap;
 
-use crate::{Transport, TransportItem, TransportError};
+use crate::{Transport, TransportItem, TransportError, Machine};
 
-pub struct MpscChannelTransport {
+pub struct MpscChannelTransport<M: Machine> {
     src: u64,
     dest: u64,
-    send: Sender<TransportItem>,
-    recv: Receiver<TransportItem>,
+    send: Sender<TransportItem<M>>,
+    recv: Receiver<TransportItem<M>>,
 }
 
-impl MpscChannelTransport {
+impl<M: Machine> MpscChannelTransport<M> {
     pub fn create_transports(node_ids: Vec<u64>) -> HashMap<u64, Vec<Self>> {
         let mut map: HashMap<_, _> = node_ids.iter()
             .map(|i| (*i, Vec::new()))
@@ -42,16 +42,16 @@ impl MpscChannelTransport {
     }
 }
 
-impl Transport for MpscChannelTransport {
-    fn send(&self, item: TransportItem) -> Result<(), TransportError> {
+impl<M: Machine> Transport<M> for MpscChannelTransport<M> {
+    fn send(&self, item: TransportItem<M>) -> Result<(), TransportError> {
         self.send.send(item).map_err(|_| TransportError::Disconnected)
     }
 
-    fn recv(&self) -> Result<TransportItem, TransportError> {
+    fn recv(&self) -> Result<TransportItem<M>, TransportError> {
         self.recv.recv().map_err(|_| TransportError::Disconnected)
     }
 
-    fn try_recv(&self) -> Result<TransportItem, TransportError> {
+    fn try_recv(&self) -> Result<TransportItem<M>, TransportError> {
         self.recv.try_recv().map_err(|e| {
             match e {
                 TryRecvError::Empty => TransportError::Empty,
