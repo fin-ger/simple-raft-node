@@ -1,5 +1,5 @@
 use std::collections::{HashMap};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 use std::thread;
 use std::convert::TryInto;
@@ -9,49 +9,20 @@ use raft::{StateRole, RawNode, Config, storage::MemStorage};
 use raft::eraftpb::{Message, MessageType, EntryType, ConfChange, ConfChangeType};
 use regex::Regex;
 use log::warn;
-use failure::Fail;
 use lazy_static::lazy_static;
 
-use crate::proposals::{Proposal, Answer, Context};
-use crate::{TransportItem, Transport, TransportError, Machine};
-
-#[derive(Debug, Fail)]
-pub enum NodeCoreError {
-    #[fail(display = "The name must end with a number that identifies the node: {}", name)]
-    NoIdInName {
-        name: String,
-    },
-    #[fail(display = "The given id in the name could not be parsed to u64: {}", name)]
-    InvalidIdInName {
-        name: String,
-        #[cause]
-        cause: <u64 as std::str::FromStr>::Err,
-    },
-    #[fail(display = "A raft operation failed")]
-    Raft {
-        #[cause]
-        cause: raft::Error,
-    },
-    #[fail(display = "Failed to deliver answer for proposal on node {}", node_name)]
-    AnswerDelivery {
-        node_name: String,
-        #[cause]
-        cause: mpsc::SendError<Answer>,
-    },
-    #[fail(display = "Failed to forward proposal to leader on node {}", node_name)]
-    ProposalForwarding {
-        node_name: String,
-        #[cause]
-        cause: TransportError,
-    },
-    #[fail(display = "Failed to append to storage")]
-    StorageAppend {
-        #[cause]
-        cause: raft::Error,
-    },
-}
-
-type Result<T> = std::result::Result<T, NodeCoreError>;
+use crate::{
+    TransportItem,
+    Transport,
+    TransportError,
+    Machine,
+    NodeResult,
+    NodeError,
+    CommitError,
+    Proposal,
+    Answer,
+    Context,
+};
 
 lazy_static! {
     static ref ID_RE: Regex = Regex::new("^.*(\\d+)$").unwrap();
@@ -81,7 +52,7 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
         mut node_transports: Vec<T>,
         proposals: Receiver<Proposal<M>>,
         answers: Sender<Answer>,
-    ) -> Result<Self> {
+    ) -> NodeResult<Self> {
         let string_name = name.into();
         let id = match ID_RE.captures(&string_name) {
             Some(caps) => {
@@ -90,13 +61,13 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
                     .unwrap()
                     .as_str()
                     .parse::<u64>()
-                    .map_err(|e| NodeCoreError::InvalidIdInName {
+                    .map_err(|e| NodeError::InvalidIdInName {
                         name: string_name.clone(),
                         cause: e,
                     })?
             },
             None => {
-                return Err(NodeCoreError::NoIdInName {
+                return Err(NodeError::NoIdInName {
                     name: string_name,
                 });
             },
@@ -122,7 +93,7 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
 
         let raft_group = Some(
             RawNode::new(&cfg, storage)
-                .map_err(|e| NodeCoreError::Raft { cause: e })?
+                .map_err(|e| NodeError::Raft { cause: e })?
         );
 
         machine.initialize(string_name.clone());
@@ -140,7 +111,7 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
     }
 
     // Initialize raft for followers.
-    fn initialize_raft_from_message(&mut self, msg: &Message) -> Result<()> {
+    fn initialize_raft_from_message(&mut self, msg: &Message) -> NodeResult<()> {
         if self.raft_group.is_some() {
             return Ok(());
         }
@@ -154,7 +125,6 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
             }
 
         let id = msg.get_to();
-        // FIXME: name and id may be out-of-sync
         // TODO: check if this code is really needed
         let cfg = Config {
             id,
@@ -164,7 +134,7 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
         let storage = Default::default();
         self.raft_group = Some(
             RawNode::new(&cfg, storage)
-                .map_err(|e| NodeCoreError::Raft {
+                .map_err(|e| NodeError::Raft {
                     cause: e,
                 })?
         );
@@ -173,23 +143,25 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
     }
 
     // Step a raft message, initialize the raft if need.
-    fn step(&mut self, msg: Message) -> Result<()> {
+    fn step(&mut self, msg: Message) -> NodeResult<()> {
         self.initialize_raft_from_message(&msg)?;
         self.raft_group
             .as_mut()
             // this option will never be `None` as it gets initialized above
             .unwrap()
             .step(msg)
-            .map_err(|e| NodeCoreError::Raft {
+            .map_err(|e| NodeError::Raft {
                 cause: e,
             })
     }
 
-    pub fn run(mut self) -> Result<()> {
+    pub fn run(mut self) -> NodeResult<()> {
         // Tick the raft node per 100ms. So use an `Instant` to trace it.
         let mut t = Instant::now();
+        // NOTE: these vectors are a possible source for memory leak
         let mut proposals = Vec::new();
         let mut messages = Vec::new();
+        let mut answers = Vec::new();
 
         'cycle: loop {
             thread::sleep(Duration::from_millis(10));
@@ -200,6 +172,7 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
                     match transport.try_recv() {
                         Ok(TransportItem::Message(msg)) => messages.push(msg),
                         Ok(TransportItem::Proposal(p)) => proposals.push(p),
+                        Ok(TransportItem::Answer(a)) => answers.push(a),
                         Err(TransportError::Empty) => break,
                         Err(TransportError::Disconnected) => break 'cycle,
                     }
@@ -208,6 +181,15 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
 
             for msg in messages.drain(..) {
                 self.step(msg)?;
+            }
+
+            for answer in answers.drain(..) {
+                self.answers
+                    .send(answer)
+                    .map_err(|e| NodeError::AnswerDelivery {
+                        node_name: self.name.clone(),
+                        cause: e,
+                    })?;
             }
 
             let raft_group = match self.raft_group {
@@ -240,39 +222,58 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
                 for proposal in proposals.drain(..) {
                     let id = proposal.id();
                     let node_id = proposal.origin();
-                    // if applying was successful:
-                    // add to proposed vector when proposal originated by us
-                    // TODO: handle apply_on errors
-                    if proposal.apply_on(raft_group) {
-                        if node_id == raft_group.raft.id {
-                            self.proposed.push(id);
+                    match proposal.apply_on(raft_group) {
+                        Ok(()) => {
+                            // if applying was successful:
+                            // add to proposed vector when proposal originated by us
+                            if node_id == raft_group.raft.id {
+                                self.proposed.push(id);
+                            }
+                        },
+                        Err(err) => {
+                            warn!("Failed to apply proposal: {}", err);
+                            let answer = Answer {
+                                id,
+                                value: false,
+                            };
+                            let name = self.name.clone();
+                            // the client who initiated the proposal is connected to us
+                            if node_id == raft_group.raft.id {
+                                // if applying was not successful, tell the client
+                                self.answers
+                                    .send(answer)
+                                    .map_err(|e| NodeError::AnswerDelivery {
+                                        node_name: name,
+                                        cause: e,
+                                    })?;
+                            } else {
+                                self.transports
+                                    .get(&node_id)
+                                    .ok_or(NodeError::NoTransportForNode {
+                                        other_node: node_id,
+                                        this_node: raft_group.raft.id,
+                                    })
+                                    .and_then(|transport| {
+                                        transport.send(TransportItem::Answer(answer))
+                                            .map_err(|e| NodeError::AnswerForwarding {
+                                                origin_node: node_id,
+                                                this_node: raft_group.raft.id,
+                                                cause: e,
+                                            })
+                                    })?;
+                            }
                         }
-                    } else {
-                        // if applying was not successful, tell the client
-                        // FIXME: this is broken when proposal was forwarded as node_id if
-                        //        proposal is not ours
-                        let answer = Answer {
-                            id,
-                            value: false,
-                        };
-                        let name = self.name.clone();
-                        self.answers
-                            .send(answer)
-                            .map_err(|e| NodeCoreError::AnswerDelivery {
-                                node_name: name,
-                                cause: e,
-                            })?;
                     }
                 }
             } else {
                 // if we know some leader
-                match self.transports.get(&raft_group.status().ss.leader_id) {
+                match self.transports.get(&raft_group.raft.leader_id) {
                     Some(leader) => {
                         // forward proposals to leader
                         for proposal in proposals.drain(..) {
                             let id = proposal.id();
                             leader.send(TransportItem::Proposal(proposal))
-                                .map_err(|e| NodeCoreError::ProposalForwarding {
+                                .map_err(|e| NodeError::ProposalForwarding {
                                     node_name: self.name.clone(),
                                     cause: e,
                                 })?;
@@ -282,8 +283,10 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
                         }
                     },
                     None => {
-                        // FIXME: display the following warning only after first leader election
-                        //warn!("No leader available to process proposals...");
+                        // display the warning only after first leader election
+                        if raft_group.raft.leader_id > 0 {
+                            warn!("Transport of leader not available, retrying on next tick...");
+                        }
                     },
                 }
             }
@@ -295,7 +298,7 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
         Ok(())
     }
 
-    fn on_ready(&mut self) -> Result<()> {
+    fn on_ready(&mut self) -> NodeResult<()> {
         let raft_group = match self.raft_group {
             Some(ref mut raft_group) => raft_group,
             None => unreachable!(),
@@ -313,7 +316,7 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
         // raft logs to the latest position.
         raft_group.raft.raft_log.store.wl()
             .append(ready.entries())
-            .map_err(|e| NodeCoreError::StorageAppend {
+            .map_err(|e| NodeError::StorageAppend {
                 cause: e,
             })?;
 
@@ -332,23 +335,48 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
                     // from new elected leaders.
                     continue;
                 }
-                if let EntryType::EntryConfChange = entry.get_entry_type() {
-                    // apply configuration changes
-                    let mut cc = ConfChange::new();
-                    // TODO: add error handling
-                    cc.merge_from_bytes(entry.get_data()).unwrap();
-                    let node_id = cc.get_node_id();
-                    match cc.get_change_type() {
-                        ConfChangeType::AddNode => raft_group.raft.add_node(node_id).unwrap(),
-                        ConfChangeType::RemoveNode => raft_group.raft.remove_node(node_id).unwrap(),
-                        ConfChangeType::AddLearnerNode => raft_group.raft.add_learner(node_id).unwrap(),
-                        ConfChangeType::BeginMembershipChange
-                            | ConfChangeType::FinalizeMembershipChange => unimplemented!(),
-                    }
-                } else {
-                    // for state change proposals, tell the machine to change its state.
-                    let state_change = bincode::deserialize(entry.get_data()).unwrap();
-                    self.machine.apply(state_change);
+                match entry.get_entry_type() {
+                    EntryType::EntryConfChange => {
+                        // apply configuration changes
+                        let mut cc = ConfChange::new();
+                        let name = self.name.clone();
+                        cc.merge_from_bytes(entry.get_data())
+                            .map_err(|e| CommitError::ConfChangeDeserialization { cause: e })
+                            .and_then(|_| {
+                                let node_id = cc.get_node_id();
+                                match cc.get_change_type() {
+                                    ConfChangeType::AddNode => {
+                                        raft_group.raft.add_node(node_id)
+                                    },
+                                    ConfChangeType::RemoveNode => {
+                                        raft_group.raft.remove_node(node_id)
+                                    },
+                                    ConfChangeType::AddLearnerNode => {
+                                        raft_group.raft.add_learner(node_id)
+                                    },
+                                    ConfChangeType::BeginMembershipChange
+                                        | ConfChangeType::FinalizeMembershipChange => {
+                                            unimplemented!()
+                                        },
+                                }.map_err(|e| CommitError::ConfChange { cause: e })
+                            })
+                            .map_err(|e| NodeError::ProposalCommit {
+                                node_name: name,
+                                cause: e,
+                            })?;
+                    },
+                    EntryType::EntryNormal => {
+                        // for state change proposals, tell the machine to change its state.
+                        let name = self.name.clone();
+                        let state_change = bincode::deserialize(entry.get_data())
+                            .map_err(|e| NodeError::ProposalCommit {
+                                node_name: name,
+                                cause: CommitError::StateChangeDeserialization {
+                                    cause: e,
+                                },
+                            })?;
+                        self.machine.apply(state_change);
+                    },
                 }
 
                 // check if the proposal had a context attached to it
@@ -359,13 +387,15 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
 
                 // if the context contains our node_id and one of our proposed proposals
                 // answer the client
-                // FIXME: this might also be a failure as proposed proposals can still fail after
-                //        forwarding
                 if node_id == raft_group.raft.id && self.proposed.contains(&proposal_id) {
+                    let name = self.name.clone();
                     self.answers.send(Answer {
                         id: proposal_id,
-                        value: true, // self-confidence :D
-                    }).unwrap();
+                        value: true, // entry committed so, it's a success
+                    }).map_err(|e| NodeError::AnswerDelivery {
+                        node_name: name,
+                        cause: e,
+                    })?;
                     self.proposed.remove_item(&proposal_id);
                 }
             }

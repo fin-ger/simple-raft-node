@@ -1,9 +1,27 @@
 use std::convert::{TryInto, TryFrom};
+
 use serde::{Deserialize, Serialize};
 use raft::{eraftpb::ConfChange, RawNode};
+use failure::Fail;
 
 use crate::serde_polyfill::ConfChangePolyfill;
 use crate::Machine;
+
+#[derive(Debug, Fail)]
+pub enum ProposalError {
+    #[fail(display = "Some data of this proposal could not be serialized to binary")]
+    Serialization {
+        #[cause]
+        cause: bincode::Error,
+    },
+    #[fail(display = "Processing of proposal failed")]
+    Processing {
+        #[cause]
+        cause: raft::Error,
+    },
+    #[fail(display = "No progress made after proposal was applied")]
+    NoProgress,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct Context {
@@ -83,25 +101,35 @@ impl<M: Machine> Proposal<M> {
         self.context.proposal_id
     }
 
-    // TODO: add error handling
-    pub fn apply_on<T: raft::Storage>(self, raft_group: &mut RawNode<T>) -> bool {
-        let last_index1 = raft_group.raft.raft_log.last_index() + 1;
-        let context = self.context.try_into().unwrap();
+    pub fn apply_on<T: raft::Storage>(self, raft_group: &mut RawNode<T>) -> Result<(), ProposalError> {
+        let last_index1 = raft_group.raft.raft_log.last_index();
+        let context = self.context
+            .try_into()
+            .map_err(|e| ProposalError::Serialization { cause: e })?;
+
         match self.kind {
             ProposalKind::StateChange(ref change) => {
-                let data = bincode::serialize(change).unwrap();
-                raft_group.propose(context, data).unwrap();
+                let data = bincode::serialize(change)
+                    .map_err(|e| ProposalError::Serialization { cause: e })?;
+                raft_group.propose(context, data)
+                    .map_err(|e| ProposalError::Processing { cause: e })?;
             },
             ProposalKind::ConfChange(ref conf_change) => {
-                raft_group.propose_conf_change(context, conf_change.clone()).unwrap();
+                raft_group.propose_conf_change(context, conf_change.clone())
+                    .map_err(|e| ProposalError::Processing { cause: e })?;
             },
             ProposalKind::TransferLeader(ref _transferee) => {
-                // TODO: implement tranfer leader.
+                // TODO: implement transfer leader.
                 unimplemented!();
             },
         };
-        let last_index2 = raft_group.raft.raft_log.last_index() + 1;
-        return last_index2 != last_index1;
+
+        if raft_group.raft.raft_log.last_index() == last_index1 {
+            // no progress made during proposal
+            return Err(ProposalError::NoProgress);
+        }
+
+        Ok(())
     }
 }
 

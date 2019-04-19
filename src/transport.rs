@@ -2,13 +2,13 @@ use raft::eraftpb::Message;
 use serde::{Serialize, Deserialize};
 use failure::Fail;
 
-use crate::proposals::Proposal;
 use crate::serde_polyfill::MessagePolyfill;
-use crate::Machine;
+use crate::{Proposal, Answer, Machine};
 
 #[derive(Serialize, Deserialize)]
 pub enum TransportItem<M: Machine> {
     Proposal(Proposal<M>),
+    Answer(Answer),
     Message(#[serde(with = "MessagePolyfill")] Message),
 }
 
