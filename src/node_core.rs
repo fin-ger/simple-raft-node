@@ -5,7 +5,7 @@ use std::thread;
 use std::convert::TryInto;
 
 use protobuf::Message as PbMessage;
-use raft::{StateRole, RawNode, Config, storage::MemStorage};
+use raft::{StateRole, RawNode, Config};
 use raft::eraftpb::{Message, MessageType, EntryType, ConfChange, ConfChangeType};
 use regex::Regex;
 use log::warn;
@@ -16,6 +16,8 @@ use crate::{
     Transport,
     TransportError,
     Machine,
+    Storage,
+    WrappedStorage,
     NodeResult,
     NodeError,
     CommitError,
@@ -28,11 +30,11 @@ lazy_static! {
     static ref ID_RE: Regex = Regex::new("^.*(\\d+)$").unwrap();
 }
 
-pub struct NodeCore<M: Machine, T: Transport<M>> {
+pub struct NodeCore<M: Machine, T: Transport<M>, S: Storage> {
     name: String,
     // None if the raft is not initialized.
     base_config: Config,
-    raft_group: Option<RawNode<MemStorage>>,
+    raft_group: Option<RawNode<WrappedStorage<S>>>,
     transports: HashMap<u64, T>,
     proposed: Vec<u64>,
     proposals: Receiver<Proposal<M>>,
@@ -40,15 +42,13 @@ pub struct NodeCore<M: Machine, T: Transport<M>> {
     machine: M,
 }
 
-// TODO: make storage configurable and remove MemStorage
-
-impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
+impl<M: Machine, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
     // Create a raft leader only with itself in its configuration.
     pub fn new<StringLike: Into<String>>(
         name: StringLike,
         base_config: Config,
         mut machine: M,
-        storage: MemStorage,
+        mut storage: S,
         mut node_transports: Vec<T>,
         proposals: Receiver<Proposal<M>>,
         answers: Sender<Answer>,
@@ -89,10 +89,12 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
             .map(|t| (t.dest(), t))
             .collect();
 
-        storage.initialize_with_conf_state((nodes, vec![]));
+        storage.init_with_conf_state(string_name.clone(), (nodes, vec![]))
+            .map_err(|_| NodeError::StorageInit)?;
+        let wrapped_storage = WrappedStorage::new(storage);
 
         let raft_group = Some(
-            RawNode::new(&cfg, storage)
+            RawNode::new(&cfg, wrapped_storage)
                 .map_err(|e| NodeError::Raft { cause: e })?
         );
 
@@ -304,6 +306,8 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
             None => unreachable!(),
         };
 
+        // TODO: implement full processing-the-ready-state chapter from raft documentation
+
         // if raft is not initialized, return
         if !raft_group.has_ready() {
             return Ok(());
@@ -314,7 +318,8 @@ impl<M: Machine, T: Transport<M>> NodeCore<M, T> {
 
         // persistent raft logs. It's necessary because in `RawNode::advance` we stabilize
         // raft logs to the latest position.
-        raft_group.raft.raft_log.store.wl()
+        raft_group.raft.raft_log.store
+            .writable()
             .append(ready.entries())
             .map_err(|e| NodeError::StorageAppend {
                 cause: e,

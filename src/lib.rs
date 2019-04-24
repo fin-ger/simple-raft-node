@@ -19,19 +19,22 @@ mod node_core;
 mod serde_polyfill;
 mod machine;
 mod transport;
+mod storage;
 
 pub mod machines;
 pub mod transports;
+pub mod storages;
 
+pub use node_error::*;
+pub use proposal::*;
 pub use machine::*;
 pub use transport::*;
-pub use proposal::*;
-pub use node_error::*;
+pub use storage::*;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use raft::{Config, storage::MemStorage};
+use raft::Config;
 
 use node_core::NodeCore;
 
@@ -43,10 +46,10 @@ pub struct Node<M: Machine> {
 
 // TODO: is 'static really needed / correct?
 impl<M: Machine + 'static> Node<M> {
-    pub fn new<T: Transport<M> + 'static>(
+    pub fn new<T: Transport<M> + 'static, S: Storage + 'static>(
         id: u64,
         machine: M,
-        storage: MemStorage,
+        storage: S,
         transports: Vec<T>,
     ) -> Self {
         let (proposals_tx, proposals_rx) = mpsc::channel();

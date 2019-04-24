@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 use failure::Fail;
-use crate::{TransportError, Answer};
+use crate::{TransportError, EntryWriteError, Answer};
 
 #[derive(Debug, Fail)]
 pub enum NodeError {
@@ -52,8 +52,11 @@ pub enum NodeError {
     #[fail(display = "Failed to append to storage")]
     StorageAppend {
         #[cause]
-        cause: raft::Error,
+        cause: EntryWriteError,
     },
+    // TODO: add Storage::InitError as cause
+    #[fail(display = "Failed to initialize storage")]
+    StorageInit,
 }
 
 #[derive(Debug, Fail)]

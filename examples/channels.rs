@@ -2,6 +2,7 @@ use log::info;
 
 use simple_raft_node::transports::MpscChannelTransport;
 use simple_raft_node::machines::{HashMapMachine, HashMapStateChange};
+use simple_raft_node::storages::MemStorage;
 use simple_raft_node::{Node, Proposal};
 
 fn main() {
@@ -11,7 +12,8 @@ fn main() {
     let mut nodes: Vec<_> = MpscChannelTransport::create_transports(vec![1, 2, 3, 4, 5])
         .drain()
         .map(|(node_id, transports)| {
-            Node::<HashMapMachine<u16, String>>::new(
+            // yeah, not quite simple yet - such a type argument mess
+            Node::<HashMapMachine<u16, String>>::new::<_, MemStorage>(
                 node_id,
                 Default::default(),
                 Default::default(),
