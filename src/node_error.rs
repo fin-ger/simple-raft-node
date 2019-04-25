@@ -1,6 +1,5 @@
-use std::sync::mpsc;
 use failure::Fail;
-use crate::{TransportError, EntryWriteError, Answer};
+use crate::{TransportError, EntryWriteError};
 
 #[derive(Debug, Fail)]
 pub enum NodeError {
@@ -27,8 +26,6 @@ pub enum NodeError {
     #[fail(display = "Failed to deliver answer for proposal on node {}", node_name)]
     AnswerDelivery {
         node_name: String,
-        #[cause]
-        cause: mpsc::SendError<Answer>,
     },
     #[fail(display = "Failed to forward answer to origin node {} from node {}", origin_node, this_node)]
     AnswerForwarding {

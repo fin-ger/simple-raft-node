@@ -8,14 +8,13 @@ use protobuf::Message as PbMessage;
 use raft::{StateRole, RawNode, Config};
 use raft::eraftpb::{Message, MessageType, EntryType, ConfChange, ConfChangeType};
 use regex::Regex;
-use log::warn;
 use lazy_static::lazy_static;
 
 use crate::{
     TransportItem,
     Transport,
     TransportError,
-    Machine,
+    MachineCore,
     Storage,
     WrappedStorage,
     NodeResult,
@@ -23,6 +22,8 @@ use crate::{
     CommitError,
     Proposal,
     Answer,
+    AnswerResult,
+    ChangeResult,
     Context,
 };
 
@@ -30,7 +31,7 @@ lazy_static! {
     static ref ID_RE: Regex = Regex::new("^.*(\\d+)$").unwrap();
 }
 
-pub struct NodeCore<M: Machine, T: Transport<M>, S: Storage> {
+pub struct NodeCore<M: MachineCore, T: Transport<M>, S: Storage> {
     name: String,
     // None if the raft is not initialized.
     base_config: Config,
@@ -38,20 +39,20 @@ pub struct NodeCore<M: Machine, T: Transport<M>, S: Storage> {
     transports: HashMap<u64, T>,
     proposed: Vec<u64>,
     proposals: Receiver<Proposal<M>>,
-    answers: Sender<Answer>,
+    answers: Sender<Answer<M>>,
     machine: M,
 }
 
-impl<M: Machine, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
+impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
     // Create a raft leader only with itself in its configuration.
     pub fn new<StringLike: Into<String>>(
         name: StringLike,
         base_config: Config,
-        mut machine: M,
+        machine: M,
         mut storage: S,
         mut node_transports: Vec<T>,
         proposals: Receiver<Proposal<M>>,
-        answers: Sender<Answer>,
+        answers: Sender<Answer<M>>,
     ) -> NodeResult<Self> {
         let string_name = name.into();
         let id = match ID_RE.captures(&string_name) {
@@ -97,8 +98,6 @@ impl<M: Machine, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
             RawNode::new(&cfg, wrapped_storage)
                 .map_err(|e| NodeError::Raft { cause: e })?
         );
-
-        machine.initialize(string_name.clone());
 
         Ok(Self {
             name: string_name,
@@ -188,9 +187,8 @@ impl<M: Machine, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
             for answer in answers.drain(..) {
                 self.answers
                     .send(answer)
-                    .map_err(|e| NodeError::AnswerDelivery {
+                    .map_err(|_| NodeError::AnswerDelivery {
                         node_name: self.name.clone(),
-                        cause: e,
                     })?;
             }
 
@@ -224,29 +222,23 @@ impl<M: Machine, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                 for proposal in proposals.drain(..) {
                     let id = proposal.id();
                     let node_id = proposal.origin();
-                    match proposal.apply_on(raft_group) {
-                        Ok(()) => {
+                    match proposal.apply_on(raft_group, &self.machine) {
+                        None => {
                             // if applying was successful:
                             // add to proposed vector when proposal originated by us
                             if node_id == raft_group.raft.id {
                                 self.proposed.push(id);
                             }
                         },
-                        Err(err) => {
-                            warn!("Failed to apply proposal: {}", err);
-                            let answer = Answer {
-                                id,
-                                value: false,
-                            };
+                        Some(answer) => {
                             let name = self.name.clone();
                             // the client who initiated the proposal is connected to us
                             if node_id == raft_group.raft.id {
                                 // if applying was not successful, tell the client
                                 self.answers
                                     .send(answer)
-                                    .map_err(|e| NodeError::AnswerDelivery {
+                                    .map_err(|_| NodeError::AnswerDelivery {
                                         node_name: name,
-                                        cause: e,
                                     })?;
                             } else {
                                 self.transports
@@ -264,7 +256,7 @@ impl<M: Machine, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                                             })
                                     })?;
                             }
-                        }
+                        },
                     }
                 }
             } else {
@@ -287,7 +279,7 @@ impl<M: Machine, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                     None => {
                         // display the warning only after first leader election
                         if raft_group.raft.leader_id > 0 {
-                            warn!("Transport of leader not available, retrying on next tick...");
+                            log::warn!("Transport of leader not available, retrying on next tick...");
                         }
                     },
                 }
@@ -329,7 +321,7 @@ impl<M: Machine, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
         for msg in ready.messages.drain(..) {
             let to = msg.get_to();
             if self.transports[&to].send(TransportItem::Message(msg)).is_err() {
-                warn!("send raft message to {} fail, let raft retry it", to);
+                log::warn!("send raft message to {} fail, let raft retry it", to);
             }
         }
 
@@ -396,10 +388,10 @@ impl<M: Machine, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                     let name = self.name.clone();
                     self.answers.send(Answer {
                         id: proposal_id,
-                        value: true, // entry committed so, it's a success
-                    }).map_err(|e| NodeError::AnswerDelivery {
+                        // entry committed so, it's a success
+                        result: AnswerResult::Change(ChangeResult::Successful),
+                    }).map_err(|_| NodeError::AnswerDelivery {
                         node_name: name,
-                        cause: e,
                     })?;
                     self.proposed.remove_item(&proposal_id);
                 }

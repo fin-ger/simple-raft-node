@@ -1,16 +1,16 @@
 use std::sync::mpsc::{self, Sender, Receiver, TryRecvError};
 use std::collections::HashMap;
 
-use crate::{Transport, TransportItem, TransportError, Machine};
+use crate::{Transport, TransportItem, TransportError, MachineCore};
 
-pub struct MpscChannelTransport<M: Machine> {
+pub struct MpscChannelTransport<M: MachineCore> {
     src: u64,
     dest: u64,
     send: Sender<TransportItem<M>>,
     recv: Receiver<TransportItem<M>>,
 }
 
-impl<M: Machine> MpscChannelTransport<M> {
+impl<M: MachineCore> MpscChannelTransport<M> {
     pub fn create_transports(node_ids: Vec<u64>) -> HashMap<u64, Vec<Self>> {
         let mut map: HashMap<_, _> = node_ids.iter()
             .map(|i| (*i, Vec::new()))
@@ -42,7 +42,7 @@ impl<M: Machine> MpscChannelTransport<M> {
     }
 }
 
-impl<M: Machine> Transport<M> for MpscChannelTransport<M> {
+impl<M: MachineCore> Transport<M> for MpscChannelTransport<M> {
     fn send(&self, item: TransportItem<M>) -> Result<(), TransportError> {
         self.send.send(item).map_err(|_| TransportError::Disconnected)
     }

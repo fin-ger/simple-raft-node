@@ -3,12 +3,12 @@ use serde::{Serialize, Deserialize};
 use failure::Fail;
 
 use crate::serde_polyfill::MessagePolyfill;
-use crate::{Proposal, Answer, Machine};
+use crate::{Proposal, Answer, MachineCore};
 
 #[derive(Serialize, Deserialize)]
-pub enum TransportItem<M: Machine> {
+pub enum TransportItem<M: MachineCore> {
     Proposal(Proposal<M>),
-    Answer(Answer),
+    Answer(Answer<M>),
     Message(#[serde(with = "MessagePolyfill")] Message),
 }
 
@@ -23,7 +23,7 @@ pub enum TransportError {
 /**
  * This trait describes a single transport (e.g. TCP socket) to one node in the cluster.
  */
-pub trait Transport<M: Machine>: Send {
+pub trait Transport<M: MachineCore>: Send {
     fn send(&self, item: TransportItem<M>) -> Result<(), TransportError>;
     fn recv(&self) -> Result<TransportItem<M>, TransportError>;
     fn try_recv(&self) -> Result<TransportItem<M>, TransportError>;

@@ -31,7 +31,7 @@ pub use machine::*;
 pub use transport::*;
 pub use storage::*;
 
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 use raft::Config;
@@ -40,15 +40,14 @@ use node_core::NodeCore;
 
 pub struct Node<M: Machine> {
     thread_handle: JoinHandle<()>,
-    proposals_tx: Sender<Proposal<M>>,
-    answers_rx: Receiver<Answer>,
+    machine: M,
 }
 
 // TODO: is 'static really needed / correct?
 impl<M: Machine + 'static> Node<M> {
-    pub fn new<T: Transport<M> + 'static, S: Storage + 'static>(
+    pub fn new<T: Transport<M::Core> + 'static, S: Storage + 'static>(
         id: u64,
-        machine: M,
+        mut machine: M,
         storage: S,
         transports: Vec<T>,
     ) -> Self {
@@ -59,43 +58,35 @@ impl<M: Machine + 'static> Node<M> {
             heartbeat_tick: 3,
             ..Default::default()
         };
+        machine.init(ProposalChannel::new(proposals_tx, answers_rx));
+
         let node = NodeCore::new(
             format!("node_{}", id),
             config,
-            machine,
+            machine.core(),
             storage,
             transports,
             proposals_rx,
             answers_tx,
         ).unwrap();
+
         // Here we spawn the node on a new thread and keep a handle so we can join on them later.
-        let handle = thread::spawn(|| {
+        let handle = thread::spawn(move || {
             node.run().unwrap();
         });
 
         Self {
             thread_handle: handle,
-            proposals_tx,
-            answers_rx,
+            machine,
         }
     }
 
-    pub fn propose(&mut self, proposal: Proposal<M>) -> bool {
-        let id = proposal.id();
-        self.proposals_tx.send(proposal).unwrap();
-        let answer = self.answers_rx.recv().unwrap();
-
-        if answer.id != id {
-            log::error!("Proposal id not identical to answer id!");
-            return false;
-        }
-
-        return answer.value;
+    pub fn mut_machine(&mut self) -> &mut M {
+        &mut self.machine
     }
 
     pub fn finalize(self) {
-        drop(self.proposals_tx);
-        drop(self.answers_rx);
+        drop(self.machine);
         self.thread_handle.join().unwrap();
     }
 }
