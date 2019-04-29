@@ -18,6 +18,14 @@ pub enum MachineError {
     StateRetrieval,
 }
 
+#[derive(Debug, Fail)]
+pub enum MachineCoreError {
+    #[fail(display = "Deserialization of machine core failed")]
+    Deserialization,
+    #[fail(display = "Serialization of machine core failed")]
+    Serialization,
+}
+
 #[derive(Clone, Debug)]
 pub enum RequestKind<M: MachineCore> {
     StateChange(M::StateChange),
@@ -144,7 +152,6 @@ impl<M: MachineCore> RequestManager<M> {
     }
 }
 
-// TODO: add init from storage
 pub trait Machine: Send + Clone + std::fmt::Debug {
     type Core: MachineCore;
 
@@ -155,11 +162,13 @@ pub trait Machine: Send + Clone + std::fmt::Debug {
 pub trait MachineItem = std::fmt::Debug + Serialize + DeserializeOwned + Clone + Send + Unpin;
 
 // the core has to own all its data
-pub trait MachineCore: Send + Clone + std::fmt::Debug + 'static {
+pub trait MachineCore: std::fmt::Debug + Clone + Send +'static {
     type StateChange: MachineItem;
     type StateIdentifier: MachineItem;
     type StateValue: MachineItem;
 
+    fn deserialize(&mut self, data: Vec<u8>) -> Result<(), MachineCoreError>;
+    fn serialize(&self) -> Result<Vec<u8>, MachineCoreError>;
     fn apply(&mut self, state_change: Self::StateChange);
     fn retrieve(
         &self,

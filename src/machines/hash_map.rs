@@ -1,27 +1,42 @@
 use std::collections::HashMap;
 
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
-use crate::{Machine, MachineCore, MachineResult, MachineError, MachineItem, RequestManager};
+use crate::{
+    Machine,
+    MachineCore,
+    MachineResult,
+    MachineError,
+    MachineCoreError,
+    RequestManager,
+};
 
 pub trait Key =
-    MachineItem
+    std::fmt::Debug
     + std::hash::Hash
     + std::cmp::Eq
+    + Clone
+    + Send
+    + Unpin
     + Default
     + 'static;
 
 pub trait Value =
-    MachineItem
+    std::fmt::Debug
+    + Clone
+    + Send
+    + Unpin
     + Default
     + 'static;
 
 #[derive(Debug, Clone, Default)]
-pub struct HashMapMachine<K: Key, V: Value> {
+pub struct
+    HashMapMachine<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOwned>
+{
     mngr: Option<RequestManager<HashMapMachineCore<K, V>>>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HashMapMachineCore<K: Key, V: Value> {
     hash_map: HashMap<K, V>,
 }
@@ -32,7 +47,9 @@ pub enum HashMapStateChange<K, V> {
     Delete(K),
 }
 
-impl<K: Key, V: Value> HashMapMachine<K, V> {
+impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOwned>
+    HashMapMachine<K, V>
+{
     pub async fn put(&self, key: K, value: V) -> MachineResult<()> {
         if let Some(ref mngr) = self.mngr {
             return await!(mngr.apply(HashMapStateChange::Put(key, value)));
@@ -58,7 +75,9 @@ impl<K: Key, V: Value> HashMapMachine<K, V> {
     }
 }
 
-impl<K: Key, V: Value> Machine for HashMapMachine<K, V> {
+impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOwned>
+    Machine for HashMapMachine<K, V>
+{
     type Core = HashMapMachineCore<K, V>;
 
     fn init(&mut self, mngr: RequestManager<Self::Core>) {
@@ -70,10 +89,21 @@ impl<K: Key, V: Value> Machine for HashMapMachine<K, V> {
     }
 }
 
-impl<K: Key, V: Value> MachineCore for HashMapMachineCore<K, V> {
+impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOwned>
+    MachineCore for HashMapMachineCore<K, V>
+{
     type StateChange = HashMapStateChange<K, V>;
     type StateIdentifier = K;
     type StateValue = V;
+
+    fn deserialize(&mut self, data: Vec<u8>) -> Result<(), MachineCoreError> {
+        *self = bincode::deserialize(&data[..]).map_err(|_| MachineCoreError::Deserialization)?;
+        Ok(())
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>, MachineCoreError> {
+        bincode::serialize(self).map_err(|_| MachineCoreError::Serialization)
+    }
 
     fn apply(&mut self, state_change: HashMapStateChange<K, V>) {
         match state_change {

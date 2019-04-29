@@ -75,10 +75,6 @@ pub enum CommitError {
         #[cause]
         cause: bincode::Error,
     },
-    #[fail(display = "Failed to apply state change")]
-    StateChange {
-        // NOTE: will be completed when machine trait is refactored
-    },
 }
 
 pub type NodeResult<T> = std::result::Result<T, NodeError>;
