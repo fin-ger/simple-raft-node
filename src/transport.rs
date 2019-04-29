@@ -8,7 +8,7 @@ use crate::{Proposal, Answer, MachineCore};
 #[derive(Serialize, Deserialize)]
 pub enum TransportItem<M: MachineCore> {
     Proposal(Proposal<M>),
-    Answer(Answer<M>),
+    Answer(Answer),
     Message(#[serde(with = "MessagePolyfill")] Message),
 }
 

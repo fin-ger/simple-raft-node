@@ -1,54 +1,57 @@
 use std::collections::HashMap;
 
-use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use serde::{Serialize, Deserialize};
 
-use crate::{Machine, MachineCore, MachineError, ProposalChannel};
+use crate::{Machine, MachineCore, MachineResult, MachineError, MachineItem, RequestManager};
 
 pub trait Key =
-    std::fmt::Debug
+    MachineItem
     + std::hash::Hash
     + std::cmp::Eq
     + Default
-    + Serialize
-    + DeserializeOwned
-    + Send;
+    + 'static;
 
 pub trait Value =
-    std::fmt::Debug
+    MachineItem
     + Default
-    + Serialize
-    + DeserializeOwned
-    + Clone
-    + Send;
+    + 'static;
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct HashMapMachine<K: Key, V: Value> {
-    channel: Option<ProposalChannel<HashMapMachineCore<K, V>>>,
+    mngr: Option<RequestManager<HashMapMachineCore<K, V>>>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct HashMapMachineCore<K: Key, V: Value> {
     hash_map: HashMap<K, V>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HashMapStateChange<K, V> {
     Put(K, V),
     Delete(K),
 }
 
 impl<K: Key, V: Value> HashMapMachine<K, V> {
-    pub fn put(&mut self, key: K, value: V) -> Result<(), MachineError> {
-        if let Some(ref mut channel) = self.channel {
-            return channel.apply(HashMapStateChange::Put(key, value));
+    pub async fn put(&self, key: K, value: V) -> MachineResult<()> {
+        if let Some(ref mngr) = self.mngr {
+            return await!(mngr.apply(HashMapStateChange::Put(key, value)));
         }
 
         Err(MachineError::ChannelsUnavailable)
     }
 
-    pub fn delete(&mut self, key: K) -> Result<(), MachineError> {
-        if let Some(ref mut channel) = self.channel {
-            return channel.apply(HashMapStateChange::Delete(key));
+    pub async fn delete(&self, key: K) -> MachineResult<()> {
+        if let Some(ref mngr) = self.mngr {
+            return await!(mngr.apply(HashMapStateChange::Delete(key)));
+        }
+
+        Err(MachineError::ChannelsUnavailable)
+    }
+
+    pub async fn get(&self, key: K) -> MachineResult<V> {
+        if let Some(ref mngr) = self.mngr {
+            return await!(mngr.retrieve(key));
         }
 
         Err(MachineError::ChannelsUnavailable)
@@ -58,8 +61,8 @@ impl<K: Key, V: Value> HashMapMachine<K, V> {
 impl<K: Key, V: Value> Machine for HashMapMachine<K, V> {
     type Core = HashMapMachineCore<K, V>;
 
-    fn init(&mut self, proposal_channel: ProposalChannel<Self::Core>) {
-        self.channel = Some(proposal_channel);
+    fn init(&mut self, mngr: RequestManager<Self::Core>) {
+        self.mngr = Some(mngr);
     }
 
     fn core(&self) -> Self::Core {
@@ -86,12 +89,5 @@ impl<K: Key, V: Value> MachineCore for HashMapMachineCore<K, V> {
     fn retrieve(&self, state_identifier: &K) -> Result<&V, MachineError> {
         self.hash_map.get(state_identifier)
             .ok_or(MachineError::StateRetrieval)
-    }
-}
-
-// TODO: remove this when debugging is done
-impl<K: Key, V: Value> Drop for HashMapMachineCore<K, V> {
-    fn drop(&mut self) {
-        log::info!("{:#?}", self.hash_map);
     }
 }

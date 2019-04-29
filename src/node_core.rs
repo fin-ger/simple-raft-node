@@ -1,9 +1,10 @@
 use std::collections::{HashMap};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
-use std::thread;
 use std::convert::TryInto;
+use std::task::Waker;
+use std::thread;
 
+use crossbeam::channel::{Receiver, Sender};
 use protobuf::Message as PbMessage;
 use raft::{StateRole, RawNode, Config};
 use raft::eraftpb::{Message, MessageType, EntryType, ConfChange, ConfChangeType};
@@ -22,9 +23,13 @@ use crate::{
     CommitError,
     Proposal,
     Answer,
-    AnswerResult,
-    ChangeResult,
+    AnswerKind,
     Context,
+    Request,
+    RequestKind,
+    Response,
+    StateChangeResult,
+    StateRetrievalResult,
 };
 
 lazy_static! {
@@ -38,8 +43,15 @@ pub struct NodeCore<M: MachineCore, T: Transport<M>, S: Storage> {
     raft_group: Option<RawNode<WrappedStorage<S>>>,
     transports: HashMap<u64, T>,
     proposed: Vec<u64>,
-    proposals: Receiver<Proposal<M>>,
-    answers: Sender<Answer<M>>,
+    proposal_id: u64,
+    timer: Instant,
+    // NOTE: these vectors are a possible source for memory leak
+    messages: Vec<Message>,
+    proposals: Vec<Proposal<M>>,
+    answers: Vec<Answer>,
+    request_rx: Receiver<Request<M>>,
+    response_txs: HashMap<u64, Sender<Response<M>>>,
+    response_wakers: HashMap<u64, Waker>,
     machine: M,
 }
 
@@ -51,8 +63,7 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
         machine: M,
         mut storage: S,
         mut node_transports: Vec<T>,
-        proposals: Receiver<Proposal<M>>,
-        answers: Sender<Answer<M>>,
+        request_rx: Receiver<Request<M>>,
     ) -> NodeResult<Self> {
         let string_name = name.into();
         let id = match ID_RE.captures(&string_name) {
@@ -105,15 +116,26 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
             raft_group,
             transports,
             proposed: Default::default(),
-            proposals,
-            answers,
+            proposal_id: 0,
+            timer: Instant::now(),
+            messages: Default::default(),
+            proposals: Default::default(),
+            answers: Default::default(),
+            request_rx,
+            response_txs: Default::default(),
+            response_wakers: Default::default(),
             machine,
         })
     }
 
     // Initialize raft for followers.
-    fn initialize_raft_from_message(&mut self, msg: &Message) -> NodeResult<()> {
-        if self.raft_group.is_some() {
+    fn initialize_raft_from_message(
+        raft_group: &mut Option<RawNode<WrappedStorage<S>>>,
+        name: &String,
+        base_config: &Config,
+        msg: &Message,
+    ) -> NodeResult<()> {
+        if raft_group.is_some() {
             return Ok(());
         }
 
@@ -129,11 +151,11 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
         // TODO: check if this code is really needed
         let cfg = Config {
             id,
-            tag: self.name.clone(),
-            ..self.base_config.clone()
+            tag: name.clone(),
+            ..base_config.clone()
         };
         let storage = Default::default();
-        self.raft_group = Some(
+        *raft_group = Some(
             RawNode::new(&cfg, storage)
                 .map_err(|e| NodeError::Raft {
                     cause: e,
@@ -144,9 +166,14 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
     }
 
     // Step a raft message, initialize the raft if need.
-    fn step(&mut self, msg: Message) -> NodeResult<()> {
-        self.initialize_raft_from_message(&msg)?;
-        self.raft_group
+    fn step(
+        raft_group: &mut Option<RawNode<WrappedStorage<S>>>,
+        name: &String,
+        base_config: &Config,
+        msg: Message,
+    ) -> NodeResult<()> {
+        Self::initialize_raft_from_message(raft_group, name, base_config, &msg)?;
+        raft_group
             .as_mut()
             // this option will never be `None` as it gets initialized above
             .unwrap()
@@ -156,137 +183,192 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
             })
     }
 
-    pub fn run(mut self) -> NodeResult<()> {
-        // Tick the raft node per 100ms. So use an `Instant` to trace it.
-        let mut t = Instant::now();
-        // NOTE: these vectors are a possible source for memory leak
+    fn send_response(
+        response_txs: &mut HashMap<u64, Sender<Response<M>>>,
+        response_wakers: &mut HashMap<u64, Waker>,
+        node_name: String,
+        answer: Answer,
+    ) -> NodeResult<()> {
+        let response = match answer.kind {
+            AnswerKind::Success => Response::StateChange(StateChangeResult::Success),
+            AnswerKind::Fail => Response::StateChange(StateChangeResult::Fail),
+        };
+        response_txs
+            .remove(&answer.id)
+            .ok_or(NodeError::AnswerDelivery { node_name: node_name.clone() })
+            .and_then(|tx| {
+                tx.send(response)
+                    .map_err(|_| NodeError::AnswerDelivery { node_name: node_name.clone() })
+            })?;
+        response_wakers
+            .remove(&answer.id)
+            .ok_or(NodeError::AnswerDelivery { node_name: node_name.clone() })
+            .and_then(|waker| {
+                Ok(waker.wake())
+            })
+    }
+
+    fn get_proposals_from_requests(&mut self, timeout: &Instant) -> NodeResult<Vec<Proposal<M>>> {
         let mut proposals = Vec::new();
-        let mut messages = Vec::new();
-        let mut answers = Vec::new();
-
-        'cycle: loop {
-            thread::sleep(Duration::from_millis(10));
-
-            for (_, transport) in &self.transports {
-                loop {
-                    // step raft messages and save forwarded proposals
-                    match transport.try_recv() {
-                        Ok(TransportItem::Message(msg)) => messages.push(msg),
-                        Ok(TransportItem::Proposal(p)) => proposals.push(p),
-                        Ok(TransportItem::Answer(a)) => answers.push(a),
-                        Err(TransportError::Empty) => break,
-                        Err(TransportError::Disconnected) => break 'cycle,
-                    }
-                }
-            }
-
-            for msg in messages.drain(..) {
-                self.step(msg)?;
-            }
-
-            for answer in answers.drain(..) {
-                self.answers
-                    .send(answer)
-                    .map_err(|_| NodeError::AnswerDelivery {
-                        node_name: self.name.clone(),
-                    })?;
-            }
-
-            let raft_group = match self.raft_group {
-                Some(ref mut r) => r,
-                // When Node::raft_group is `None` it means the node is not initialized.
-                _ => continue,
+        loop {
+            let node_id = match self.raft_group {
+                Some(ref raft_group) => raft_group.raft.id,
+                None => break,
             };
 
+            // receive new requests from the user
+            let request = match self.request_rx.try_recv() {
+                Ok(request) => request,
+                Err(_) => break,
+            };
+
+            match request.kind {
+                RequestKind::StateChange(state_change) => {
+                    let id = self.proposal_id;
+                    self.proposal_id += 1;
+                    self.response_txs.insert(id, request.response_tx);
+                    self.response_wakers.insert(id, request.waker);
+                    proposals.push(Proposal::state_change(id, node_id, state_change));
+                },
+                RequestKind::StateRetrieval(identifier) => {
+                    let response = match self.machine.retrieve(&identifier) {
+                        // make the value a snapshot (a copy)
+                        Ok(value) => Response::StateRetrieval(
+                            StateRetrievalResult::Found(value.clone())
+                        ),
+                        Err(_) => Response::StateRetrieval(StateRetrievalResult::NotFound),
+                    };
+                    request.response_tx.send(response)
+                        .map_err(|_| NodeError::AnswerDelivery { node_name: self.name.clone() })?;
+                    request.waker.wake();
+                }
+            }
+
+            if timeout.elapsed() >= Duration::from_millis(10) {
+                break;
+            }
+        }
+
+        Ok(proposals)
+    }
+
+    pub fn advance(&mut self) -> NodeResult<()> {
+        let timeout = Instant::now();
+        'transports: for (_, transport) in &self.transports {
             loop {
-                // save all new proposal requests
-                match self.proposals.try_recv() {
-                    Ok(mut proposal) => {
-                        proposal.set_origin(raft_group.raft.id);
-                        proposals.push(proposal);
+                // step raft messages and save forwarded proposals
+                match transport.try_recv() {
+                    Ok(TransportItem::Message(msg)) => self.messages.push(msg),
+                    Ok(TransportItem::Proposal(p)) => self.proposals.push(p),
+                    Ok(TransportItem::Answer(a)) => self.answers.push(a),
+                    Err(TransportError::Empty) => break,
+                    Err(TransportError::Disconnected) => {
+                        //log::warn!("host for raft {} is down!", transport.dest());
+                        break;
                     },
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break 'cycle,
+                }
+
+                if timeout.elapsed() >= Duration::from_millis(5) {
+                    break 'transports;
                 }
             }
+        }
 
-            if t.elapsed() >= Duration::from_millis(100) {
-                // tick the raft.
-                raft_group.tick();
-                t = Instant::now();
-            }
+        for msg in self.messages.drain(..) {
+            Self::step(&mut self.raft_group, &self.name, &self.base_config, msg)?;
+        }
 
-            // handle saved proposals if we are leader
-            if raft_group.raft.state == StateRole::Leader {
-                // drain the proposals (consume all)
-                for proposal in proposals.drain(..) {
-                    let id = proposal.id();
-                    let node_id = proposal.origin();
-                    match proposal.apply_on(raft_group, &self.machine) {
-                        None => {
-                            // if applying was successful:
-                            // add to proposed vector when proposal originated by us
-                            if node_id == raft_group.raft.id {
-                                self.proposed.push(id);
-                            }
-                        },
-                        Some(answer) => {
-                            let name = self.name.clone();
-                            // the client who initiated the proposal is connected to us
-                            if node_id == raft_group.raft.id {
-                                // if applying was not successful, tell the client
-                                self.answers
-                                    .send(answer)
-                                    .map_err(|_| NodeError::AnswerDelivery {
-                                        node_name: name,
-                                    })?;
-                            } else {
-                                self.transports
-                                    .get(&node_id)
-                                    .ok_or(NodeError::NoTransportForNode {
-                                        other_node: node_id,
-                                        this_node: raft_group.raft.id,
-                                    })
-                                    .and_then(|transport| {
-                                        transport.send(TransportItem::Answer(answer))
-                                            .map_err(|e| NodeError::AnswerForwarding {
-                                                origin_node: node_id,
-                                                this_node: raft_group.raft.id,
-                                                cause: e,
-                                            })
-                                    })?;
-                            }
-                        },
-                    }
-                }
-            } else {
-                // if we know some leader
-                match self.transports.get(&raft_group.raft.leader_id) {
-                    Some(leader) => {
-                        // forward proposals to leader
-                        for proposal in proposals.drain(..) {
-                            let id = proposal.id();
-                            leader.send(TransportItem::Proposal(proposal))
-                                .map_err(|e| NodeError::ProposalForwarding {
-                                    node_name: self.name.clone(),
-                                    cause: e,
-                                })?;
-                            // proposal was forwarded and can therefore be put in our proposed
-                            // list to prepare for client answer
+        for answer in self.answers.drain(..) {
+            let proposal_id = answer.id;
+            Self::send_response(&mut self.response_txs, &mut self.response_wakers, self.name.clone(), answer)?;
+            self.proposed.remove_item(&proposal_id);
+        }
+
+        let mut new_proposals = self.get_proposals_from_requests(&timeout)?;
+        self.proposals.append(&mut new_proposals);
+
+        let raft_group = match self.raft_group {
+            Some(ref mut r) => r,
+            // When Node::raft_group is `None` it means the node is not initialized.
+            _ => return Ok(()),
+        };
+
+        if self.timer.elapsed() >= Duration::from_millis(100) {
+            // tick the raft.
+            raft_group.tick();
+            self.timer = Instant::now();
+        }
+
+        // handle saved proposals if we are leader
+        if raft_group.raft.state == StateRole::Leader {
+            // drain the proposals (consume all)
+            for proposal in self.proposals.drain(..) {
+                let id = proposal.id();
+                let node_id = proposal.origin();
+                let answer = match proposal.apply_on(raft_group) {
+                    None => {
+                        // if applying was successful:
+                        // add to proposed vector when proposal originated by us
+                        if node_id == raft_group.raft.id {
                             self.proposed.push(id);
                         }
+                        continue;
                     },
-                    None => {
-                        // display the warning only after first leader election
-                        if raft_group.raft.leader_id > 0 {
-                            log::warn!("Transport of leader not available, retrying on next tick...");
-                        }
-                    },
+                    Some(answer) => answer,
+                };
+                // the client who initiated the proposal is connected to us
+                if node_id == raft_group.raft.id {
+                    // if applying was not successful, tell the client
+                    Self::send_response(&mut self.response_txs, &mut self.response_wakers, self.name.clone(), answer)?;
+                } else {
+                    self.transports
+                        .get(&node_id)
+                        .ok_or(NodeError::NoTransportForNode {
+                            other_node: node_id,
+                            this_node: raft_group.raft.id,
+                        })
+                        .and_then(|transport| {
+                            transport.send(TransportItem::Answer(answer))
+                                .map_err(|e| NodeError::AnswerForwarding {
+                                    origin_node: node_id,
+                                    this_node: raft_group.raft.id,
+                                    cause: e,
+                                })
+                        })?;
                 }
             }
+        } else {
+            // if we know some leader
+            match self.transports.get(&raft_group.raft.leader_id) {
+                Some(leader) => {
+                    let name = &self.name;
+                    // forward proposals to leader
+                    for proposal in self.proposals.drain(..) {
+                        let id = proposal.id();
+                        leader.send(TransportItem::Proposal(proposal))
+                            .map_err(|e| NodeError::ProposalForwarding {
+                                node_name: name.clone(),
+                                cause: e,
+                            })?;
+                        // proposal was forwarded and can therefore be put in our proposed
+                        // list to prepare for client answer
+                        self.proposed.push(id);
+                    }
+                },
+                None => {
+                    // display the warning only after first leader election
+                    if raft_group.raft.leader_id > 0 {
+                        log::warn!("Transport of leader not available, retrying on next tick...");
+                    }
+                },
+            }
+        }
 
-            // handle readies from the raft.
-            self.on_ready()?;
+        // handle readies from the raft.
+        self.on_ready()?;
+
+        if let Some(duration) = Duration::from_millis(10).checked_sub(timeout.elapsed()) {
+            thread::sleep(duration);
         }
 
         Ok(())
@@ -385,13 +467,10 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                 // if the context contains our node_id and one of our proposed proposals
                 // answer the client
                 if node_id == raft_group.raft.id && self.proposed.contains(&proposal_id) {
-                    let name = self.name.clone();
-                    self.answers.send(Answer {
+                    log::info!("committed proposal {}", proposal_id);
+                    Self::send_response(&mut self.response_txs, &mut self.response_wakers, self.name.clone(), Answer {
                         id: proposal_id,
-                        // entry committed so, it's a success
-                        result: AnswerResult::Change(ChangeResult::Successful),
-                    }).map_err(|_| NodeError::AnswerDelivery {
-                        node_name: name,
+                        kind: AnswerKind::Success,
                     })?;
                     self.proposed.remove_item(&proposal_id);
                 }

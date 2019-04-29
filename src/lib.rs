@@ -10,8 +10,7 @@
 // distributed under the License is distributed on an "AS IS" BASIS,
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![feature(vec_remove_item)]
-#![feature(trait_alias)]
+#![feature(vec_remove_item, trait_alias, fn_traits, async_await, await_macro)]
 
 mod proposal;
 mod node_error;
@@ -31,62 +30,86 @@ pub use machine::*;
 pub use transport::*;
 pub use storage::*;
 
-use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
+use std::sync::{Arc, Mutex};
 
 use raft::Config;
+use crossbeam::channel;
 
 use node_core::NodeCore;
 
 pub struct Node<M: Machine> {
-    thread_handle: JoinHandle<()>,
+    name: String,
     machine: M,
+    handle: Option<JoinHandle<()>>,
+    is_running: Arc<Mutex<bool>>,
 }
 
-// TODO: is 'static really needed / correct?
-impl<M: Machine + 'static> Node<M> {
-    pub fn new<T: Transport<M::Core> + 'static, S: Storage + 'static>(
-        id: u64,
+impl<M: Machine> Node<M> {
+    pub fn new<IntoString: Into<String>, T: Transport<M::Core> + 'static, S: Storage + 'static>(
+        name: IntoString,
         mut machine: M,
         storage: S,
         transports: Vec<T>,
     ) -> Self {
-        let (proposals_tx, proposals_rx) = mpsc::channel();
-        let (answers_tx, answers_rx) = mpsc::channel();
+        let (response_tx, response_rx) = channel::unbounded();
         let config = Config {
             election_tick: 10,
             heartbeat_tick: 3,
             ..Default::default()
         };
-        machine.init(ProposalChannel::new(proposals_tx, answers_rx));
+        machine.init(RequestManager::new(response_tx));
+        let name_s = name.into();
 
-        let node = NodeCore::new(
-            format!("node_{}", id),
+        let mut node = NodeCore::new(
+            name_s.clone(),
             config,
             machine.core(),
             storage,
             transports,
-            proposals_rx,
-            answers_tx,
+            response_rx,
         ).unwrap();
 
-        // Here we spawn the node on a new thread and keep a handle so we can join on them later.
+        let is_running = Arc::new(Mutex::new(true));
+        let is_running_copy = is_running.clone();
+
         let handle = thread::spawn(move || {
-            node.run().unwrap();
+            loop {
+                if !*is_running.lock().unwrap() {
+                    break;
+                }
+
+                match node.advance() {
+                    Ok(()) => {},
+                    Err(err) => {
+                        log::error!("advance of node failed: {}", err);
+                        break;
+                    },
+                };
+            }
         });
 
         Self {
-            thread_handle: handle,
+            name: name_s,
             machine,
+            handle: Some(handle),
+            is_running: is_running_copy,
         }
     }
 
-    pub fn mut_machine(&mut self) -> &mut M {
-        &mut self.machine
+    pub fn machine(&self) -> &M {
+        &self.machine
     }
 
-    pub fn finalize(self) {
-        drop(self.machine);
-        self.thread_handle.join().unwrap();
+    pub fn name(&self) -> &String {
+        &self.name
+    }
+}
+
+impl<M: Machine> Drop for Node<M> {
+    fn drop(&mut self) {
+        log::info!("{} is shutting down...", self.name);
+        *self.is_running.lock().unwrap() = false;
+        self.handle.take().unwrap().join().unwrap();
     }
 }

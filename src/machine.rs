@@ -1,9 +1,12 @@
-use std::sync::mpsc::{Sender, Receiver};
+use std::future::Future;
+use std::task::{Poll, Context, Waker};
+use std::pin::Pin;
 
+use crossbeam::channel::{self, Sender, Receiver, TryRecvError};
 use serde::{Serialize, de::DeserializeOwned};
 use failure::Fail;
 
-use crate::{Proposal, Answer, AnswerResult, ChangeResult, RetrievalResult};
+pub type MachineResult<T> = Result<T, MachineError>;
 
 #[derive(Debug, Fail)]
 pub enum MachineError {
@@ -15,77 +18,147 @@ pub enum MachineError {
     StateRetrieval,
 }
 
-pub struct ProposalChannel<M: MachineCore> {
-    tx: Sender<Proposal<M>>,
-    rx: Receiver<Answer<M>>,
+#[derive(Clone, Debug)]
+pub enum RequestKind<M: MachineCore> {
+    StateChange(M::StateChange),
+    StateRetrieval(M::StateIdentifier),
 }
 
-// TODO: make apply non-blocking, so that more than 1 proposal can be processed per tick (100ms)
-impl<M: MachineCore> ProposalChannel<M> {
-    pub fn new(tx: Sender<Proposal<M>>, rx: Receiver<Answer<M>>) -> Self {
+#[derive(Debug)]
+pub struct Request<M: MachineCore> {
+    pub response_tx: Sender<Response<M>>,
+    pub waker: Waker,
+    pub kind: RequestKind<M>,
+}
+
+#[derive(Debug)]
+pub enum StateChangeResult {
+    Success,
+    Fail,
+}
+
+#[derive(Debug)]
+pub enum StateRetrievalResult<M: MachineCore> {
+    Found(M::StateValue),
+    NotFound,
+}
+
+#[derive(Debug)]
+pub enum Response<M: MachineCore> {
+    StateChange(StateChangeResult),
+    StateRetrieval(StateRetrievalResult<M>),
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestManager<M: MachineCore> {
+    tx: Sender<Request<M>>,
+}
+
+struct RequestFuture<M: MachineCore, T: Sized + 'static, F: Fn(Response<M>) -> MachineResult<T> + Unpin> {
+    kind: RequestKind<M>,
+    response_handler: F,
+    request_sent: bool,
+    request_tx: Sender<Request<M>>,
+    response_tx: Sender<Response<M>>,
+    response_rx: Receiver<Response<M>>,
+}
+
+impl<M: MachineCore, T: Sized + 'static, F: Fn(Response<M>) -> MachineResult<T> + Unpin> RequestFuture<M, T, F> {
+    fn new(kind: RequestKind<M>, response_handler: F, request_tx: Sender<Request<M>>) -> Self {
+        let (response_tx, response_rx) = channel::unbounded();
+        Self {
+            kind,
+            response_handler,
+            request_tx,
+            response_tx,
+            response_rx,
+            request_sent: false,
+        }
+    }
+}
+
+impl<M: MachineCore, T: Sized + 'static, F: Fn(Response<M>) -> MachineResult<T> + Unpin>
+    Future for RequestFuture<M, T, F>
+{
+    type Output = MachineResult<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let fut = self.get_mut();
+
+        if !fut.request_sent {
+            fut.request_tx.send(Request {
+                response_tx: fut.response_tx.clone(),
+                waker: cx.waker().clone(),
+                kind: fut.kind.clone(),
+            }).map_err(|_| MachineError::ChannelsUnavailable)?;
+            fut.request_sent = true;
+        }
+
+        match fut.response_rx.try_recv() {
+            Ok(response) => Poll::Ready(fut.response_handler.call((response,))),
+            Err(TryRecvError::Empty) => Poll::Pending,
+            Err(TryRecvError::Disconnected) => Poll::Ready(Err(MachineError::ChannelsUnavailable)),
+        }
+    }
+}
+
+impl<M: MachineCore> RequestManager<M> {
+    pub fn new(tx: Sender<Request<M>>) -> Self {
         Self {
             tx,
-            rx,
         }
     }
 
-    pub fn apply(&mut self, state_change: M::StateChange) -> Result<(), MachineError> {
-        // FIXME: as state changes are synchronous for now, we can use a
-        //        constant proposal id. This will need management when
-        //        answer id's get evaluated properly in propose.
-        let proposal = Proposal::state_change(42, state_change);
-        let id = proposal.id();
-        self.tx.send(proposal).map_err(|_| MachineError::ChannelsUnavailable)?;
-        let answer = self.rx.recv().map_err(|_| MachineError::ChannelsUnavailable)?;
-
-        if answer.id != id {
-            log::error!("Proposal id not identical to answer id!");
-            // FIXME: answer can still be in a later message, as this whole thing here
-            //        might be async
-            return Err(MachineError::StateChange);
-        }
-
-        match answer.result {
-            AnswerResult::Change(ChangeResult::Successful) => Ok(()),
-            _ => Err(MachineError::StateChange),
-        }
+    fn request<T: Sized + 'static, F>(
+        &self,
+        kind: RequestKind<M>,
+        response_handler: F,
+    ) -> RequestFuture<M, T, F> where F: Fn(Response<M>) -> MachineResult<T> + Unpin {
+        RequestFuture::new(kind, response_handler, self.tx.clone())
     }
 
-    pub fn retrieve(
-        &mut self,
-        state_identifier: M::StateIdentifier,
-    ) -> Result<RetrievalResult<M>, MachineError> {
-        let proposal = Proposal::state_retrieval(42, state_identifier);
-        let id = proposal.id();
-        self.tx.send(proposal).map_err(|_| MachineError::ChannelsUnavailable)?;
-        let answer = self.rx.recv().map_err(|_| MachineError::ChannelsUnavailable)?;
+    pub async fn apply(&self, state_change: M::StateChange) -> MachineResult<()> {
+        await!(self.request(
+            RequestKind::StateChange(state_change),
+            |result| {
+                match result {
+                    Response::StateChange(StateChangeResult::Success) => Ok(()),
+                    _ => Err(MachineError::StateChange),
+                }
+            },
+        ))
+    }
 
-        if answer.id != id {
-            log::error!("Proposal id not identical to answer id!");
-            // FIXME: answer can still be in a later message, as this whole thing here
-            //        might be async
-            return Err(MachineError::StateRetrieval);
-        }
-
-        match answer.result {
-            AnswerResult::Retrieval(value) => Ok(value),
-            _ => Err(MachineError::StateRetrieval),
-        }
+    pub async fn retrieve(
+        &self, state_identifier: M::StateIdentifier,
+    ) -> MachineResult<M::StateValue> {
+        await!(self.request(
+            RequestKind::StateRetrieval(state_identifier),
+            |result| {
+                match result {
+                    Response::StateRetrieval(StateRetrievalResult::Found(value)) => Ok(value),
+                    _ => Err(MachineError::StateRetrieval),
+                }
+            },
+        ))
     }
 }
 
 // TODO: add init from storage
-pub trait Machine: Send {
+pub trait Machine: Send + Clone + std::fmt::Debug {
     type Core: MachineCore;
 
-    fn init(&mut self, proposal_channel: ProposalChannel<Self::Core>);
+    fn init(&mut self, request_manager: RequestManager<Self::Core>);
     fn core(&self) -> Self::Core;
 }
 
-pub trait MachineCore: Send {
-    type StateChange: Serialize + DeserializeOwned + Send;
-    type StateIdentifier: Serialize + DeserializeOwned + Send;
-    type StateValue: Serialize + DeserializeOwned + Clone + Send;
+pub trait MachineItem = std::fmt::Debug + Serialize + DeserializeOwned + Clone + Send + Unpin;
+
+// the core has to own all its data
+pub trait MachineCore: Send + Clone + std::fmt::Debug + 'static {
+    type StateChange: MachineItem;
+    type StateIdentifier: MachineItem;
+    type StateValue: MachineItem;
 
     fn apply(&mut self, state_change: Self::StateChange);
     fn retrieve(
