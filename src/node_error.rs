@@ -1,5 +1,5 @@
 use failure::Fail;
-use crate::{TransportError, EntryWriteError};
+use crate::{TransportError, EntryWriteError, SnapshotWriteError, WriteError};
 
 #[derive(Debug, Fail)]
 pub enum NodeError {
@@ -50,6 +50,16 @@ pub enum NodeError {
     StorageAppend {
         #[cause]
         cause: EntryWriteError,
+    },
+    #[fail(display = "Failed to apply snapshot to storage")]
+    StorageSnapshot {
+        #[cause]
+        cause: SnapshotWriteError,
+    },
+    #[fail(display = "Failed to write state to storage")]
+    StorageState {
+        #[cause]
+        cause: WriteError,
     },
     // TODO: add Storage::InitError as cause
     #[fail(display = "Failed to initialize storage")]

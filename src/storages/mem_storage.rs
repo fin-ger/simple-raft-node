@@ -1,5 +1,8 @@
 use crate::{
     Storage,
+    ConfState,
+    HardState,
+    WriteError,
     Snapshot,
     SnapshotMetadata,
     SnapshotReadError,
@@ -11,6 +14,8 @@ use crate::{
 
 #[derive(Default)]
 pub struct MemStorage {
+    hard_state: HardState,
+    conf_state: ConfState,
     snapshot: Snapshot,
     // We store the metadata explicitly as it is recommended for other storage
     // implementations that use this code as a reference. Although the metadata
@@ -35,6 +40,24 @@ impl Storage for MemStorage {
         Ok(())
     }
 
+    fn hard_state<'a>(&'a self) -> &'a HardState {
+        &self.hard_state
+    }
+
+    fn set_hard_state(&mut self, hard_state: HardState) -> Result<(), WriteError> {
+        self.hard_state = hard_state;
+        Ok(())
+    }
+
+    fn conf_state<'a>(&'a self) -> &'a ConfState {
+        &self.conf_state
+    }
+
+    fn set_conf_state(&mut self, conf_state: ConfState) -> Result<(), WriteError> {
+        self.conf_state = conf_state;
+        Ok(())
+    }
+
     fn snapshot(&self) -> Result<Snapshot, SnapshotReadError> {
         Ok(self.snapshot.clone())
     }
@@ -47,10 +70,13 @@ impl Storage for MemStorage {
         let metadata = snapshot.get_metadata();
 
         if self.first_index() > metadata.get_index() {
-            return Err(SnapshotWriteError::SnapshotOutOfDate);
+            return Err(SnapshotWriteError::OutOfDate);
         }
 
         self.snapshot_metadata = metadata.clone();
+        self.hard_state.set_term(metadata.get_term());
+        self.hard_state.set_commit(metadata.get_index());
+        self.conf_state = metadata.get_conf_state().clone();
         self.snapshot = snapshot;
         self.entries.clear();
 

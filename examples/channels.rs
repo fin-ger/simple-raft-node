@@ -26,9 +26,9 @@ async fn main() {
         })
         .collect();
 
-    // Put 5 key-value pairs.
+    // Put 10000 key-value pairs.
     let mut handles = Vec::new();
-    for i in 0..5 {
+    for i in 0..10000 {
         let machine = nodes[0].machine().clone();
         handles.push(runtime::spawn(async move {
             let content = format!("hello, world {}", i);
@@ -47,7 +47,7 @@ async fn main() {
 
     for node in nodes.iter() {
         let name = node.name().clone();
-        let handles: Vec<_> = (0..5)
+        let handles: Vec<_> = (0..10000)
             .map(|i| {
                 let machine = node.machine().clone();
                 runtime::spawn(async move {

@@ -1,5 +1,5 @@
 pub use raft::eraftpb::{Snapshot, SnapshotMetadata, Entry};
-use raft::eraftpb::{ConfState, HardState};
+pub use raft::eraftpb::{ConfState, HardState};
 use raft::storage::RaftState;
 use failure::Fail;
 
@@ -18,6 +18,10 @@ pub enum SnapshotReadError {
 }
 
 #[derive(Debug, Fail)]
+#[fail(display = "The state cannot be read from the storage!")]
+pub struct ReadError;
+
+#[derive(Debug, Fail)]
 pub enum EntryWriteError {
     #[fail(display = "Cannot overwrite already compacted raft logs! The log is compacted until index {}, but new entry has index {}.", compacted_index, entry_index)]
     AlreadyCompacted {
@@ -29,18 +33,30 @@ pub enum EntryWriteError {
         last_entry: u64,
         entry_index: u64,
     },
+    #[fail(display = "The entry could not be written by the storage!")]
+    Write,
 }
 
 #[derive(Debug, Fail)]
 pub enum SnapshotWriteError {
     #[fail(display = "The snapshot that was about to be applied is out of date!")]
-    SnapshotOutOfDate,
+    OutOfDate,
+    #[fail(display = "The snapshot could not be written by the storage!")]
+    Write,
 }
+
+#[derive(Debug, Fail)]
+#[fail(display = "The state could not be written by the storage!")]
+pub struct WriteError;
 
 pub trait Storage: Default + Send + Sized {
     type InitError;
 
     fn init<IntoString: Into<String>>(&mut self, node_name: IntoString) -> Result<(), Self::InitError>;
+    fn hard_state<'a>(&'a self) -> &'a HardState;
+    fn set_hard_state(&mut self, hard_state: HardState) -> Result<(), WriteError>;
+    fn conf_state<'a>(&'a self) -> &'a ConfState;
+    fn set_conf_state(&mut self, conf_state: ConfState) -> Result<(), WriteError>;
     fn snapshot(&self) -> Result<Snapshot, SnapshotReadError>;
     fn snapshot_metadata<'a>(&'a self) -> &'a SnapshotMetadata;
     fn set_snapshot(&mut self, snapshot: Snapshot) -> Result<(), SnapshotWriteError>;
@@ -106,12 +122,8 @@ impl<T: Storage> WrappedStorage<T> {
 impl<T: Storage> raft::Storage for WrappedStorage<T> {
     fn initial_state(&self) -> raft::Result<RaftState> {
         Ok(RaftState::new(
-            HardState {
-                term: self.storage.snapshot_metadata().get_term(),
-                commit: self.storage.snapshot_metadata().get_index(),
-                ..Default::default()
-            },
-            self.storage.snapshot_metadata().get_conf_state().clone(),
+            self.storage.hard_state().clone(),
+            self.storage.conf_state().clone(),
         ))
     }
 

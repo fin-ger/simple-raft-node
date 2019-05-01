@@ -7,7 +7,16 @@ use std::thread;
 use crossbeam::channel::{Receiver, Sender};
 use protobuf::Message as PbMessage;
 use raft::{StateRole, RawNode, Config};
-use raft::eraftpb::{Message, MessageType, EntryType, ConfChange, ConfChangeType};
+use raft::eraftpb::{
+    Message,
+    MessageType,
+    EntryType,
+    ConfChange,
+    ConfChangeType,
+    Snapshot,
+    HardState,
+    ConfState,
+};
 use regex::Regex;
 use lazy_static::lazy_static;
 
@@ -43,12 +52,9 @@ pub struct NodeCore<M: MachineCore, T: Transport<M>, S: Storage> {
     raft_group: Option<RawNode<WrappedStorage<S>>>,
     transports: HashMap<u64, T>,
     proposed: Vec<u64>,
+    proposals: Vec<Proposal<M>>,
     proposal_id: u64,
     timer: Instant,
-    // NOTE: these vectors are a possible source for memory leak
-    messages: Vec<Message>,
-    proposals: Vec<Proposal<M>>,
-    answers: Vec<Answer>,
     request_rx: Receiver<Request<M>>,
     response_txs: HashMap<u64, Sender<Response<M>>>,
     response_wakers: HashMap<u64, Waker>,
@@ -116,11 +122,9 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
             raft_group,
             transports,
             proposed: Default::default(),
+            proposals: Default::default(),
             proposal_id: 0,
             timer: Instant::now(),
-            messages: Default::default(),
-            proposals: Default::default(),
-            answers: Default::default(),
             request_rx,
             response_txs: Default::default(),
             response_wakers: Default::default(),
@@ -129,13 +133,8 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
     }
 
     // Initialize raft for followers.
-    fn initialize_raft_from_message(
-        raft_group: &mut Option<RawNode<WrappedStorage<S>>>,
-        name: &String,
-        base_config: &Config,
-        msg: &Message,
-    ) -> NodeResult<()> {
-        if raft_group.is_some() {
+    fn initialize_raft_from_message(&mut self, msg: &Message) -> NodeResult<()> {
+        if self.raft_group.is_some() {
             return Ok(());
         }
 
@@ -151,11 +150,11 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
         // TODO: check if this code is really needed
         let cfg = Config {
             id,
-            tag: name.clone(),
-            ..base_config.clone()
+            tag: self.name.clone(),
+            ..self.base_config.clone()
         };
         let storage = Default::default();
-        *raft_group = Some(
+        self.raft_group = Some(
             RawNode::new(&cfg, storage)
                 .map_err(|e| NodeError::Raft {
                     cause: e,
@@ -166,14 +165,9 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
     }
 
     // Step a raft message, initialize the raft if need.
-    fn step(
-        raft_group: &mut Option<RawNode<WrappedStorage<S>>>,
-        name: &String,
-        base_config: &Config,
-        msg: Message,
-    ) -> NodeResult<()> {
-        Self::initialize_raft_from_message(raft_group, name, base_config, &msg)?;
-        raft_group
+    fn step(&mut self, msg: Message) -> NodeResult<()> {
+        self.initialize_raft_from_message(&msg)?;
+        self.raft_group
             .as_mut()
             // this option will never be `None` as it gets initialized above
             .unwrap()
@@ -183,26 +177,21 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
             })
     }
 
-    fn send_response(
-        response_txs: &mut HashMap<u64, Sender<Response<M>>>,
-        response_wakers: &mut HashMap<u64, Waker>,
-        node_name: String,
-        answer: Answer,
-    ) -> NodeResult<()> {
+    fn send_response(&mut self, answer: Answer) -> NodeResult<()> {
         let response = match answer.kind {
             AnswerKind::Success => Response::StateChange(StateChangeResult::Success),
             AnswerKind::Fail => Response::StateChange(StateChangeResult::Fail),
         };
-        response_txs
+        self.response_txs
             .remove(&answer.id)
-            .ok_or(NodeError::AnswerDelivery { node_name: node_name.clone() })
+            .ok_or(NodeError::AnswerDelivery { node_name: self.name.clone() })
             .and_then(|tx| {
                 tx.send(response)
-                    .map_err(|_| NodeError::AnswerDelivery { node_name: node_name.clone() })
+                    .map_err(|_| NodeError::AnswerDelivery { node_name: self.name.clone() })
             })?;
-        response_wakers
+        self.response_wakers
             .remove(&answer.id)
-            .ok_or(NodeError::AnswerDelivery { node_name: node_name.clone() })
+            .ok_or(NodeError::AnswerDelivery { node_name: self.name.clone() })
             .and_then(|waker| {
                 Ok(waker.wake())
             })
@@ -254,13 +243,17 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
 
     pub fn advance(&mut self) -> NodeResult<()> {
         let timeout = Instant::now();
+
+        let mut messages = Vec::new();
+        let mut answers = Vec::new();
+
         'transports: for (_, transport) in &self.transports {
             loop {
                 // step raft messages and save forwarded proposals
                 match transport.try_recv() {
-                    Ok(TransportItem::Message(msg)) => self.messages.push(msg),
+                    Ok(TransportItem::Message(msg)) => messages.push(msg),
                     Ok(TransportItem::Proposal(p)) => self.proposals.push(p),
-                    Ok(TransportItem::Answer(a)) => self.answers.push(a),
+                    Ok(TransportItem::Answer(a)) => answers.push(a),
                     Err(TransportError::Empty) => break,
                     Err(TransportError::Disconnected) => {
                         //log::warn!("host for raft {} is down!", transport.dest());
@@ -274,42 +267,52 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
             }
         }
 
-        for msg in self.messages.drain(..) {
-            Self::step(&mut self.raft_group, &self.name, &self.base_config, msg)?;
+        for answer in answers.drain(..) {
+            let proposal_id = answer.id;
+            self.send_response(answer)?;
+            self.proposed.remove_item(&proposal_id);
         }
 
-        for answer in self.answers.drain(..) {
-            let proposal_id = answer.id;
-            Self::send_response(&mut self.response_txs, &mut self.response_wakers, self.name.clone(), answer)?;
-            self.proposed.remove_item(&proposal_id);
+        for msg in messages.drain(..) {
+            self.step(msg)?;
+        }
+
+        if self.raft_group.is_none() {
+            return Ok(());
+        }
+
+        let node_id = self.raft_group.as_ref().unwrap().raft.id;
+
+        if self.timer.elapsed() >= Duration::from_millis(100) {
+            // tick the raft.
+            self.raft_group.as_mut().unwrap().tick();
+            self.timer = Instant::now();
         }
 
         let mut new_proposals = self.get_proposals_from_requests(&timeout)?;
         self.proposals.append(&mut new_proposals);
 
-        let raft_group = match self.raft_group {
-            Some(ref mut r) => r,
-            // When Node::raft_group is `None` it means the node is not initialized.
-            _ => return Ok(()),
-        };
-
-        if self.timer.elapsed() >= Duration::from_millis(100) {
-            // tick the raft.
-            raft_group.tick();
-            self.timer = Instant::now();
-        }
-
         // handle saved proposals if we are leader
-        if raft_group.raft.state == StateRole::Leader {
+        if self.raft_group.as_ref().unwrap().raft.state == StateRole::Leader {
+            let mut my_answers = Vec::new();
+            // FIXME: only reading first 110 proposals, as otherwise the raft
+            //        is unable to always process them. This needs further
+            //        investigation and is definitely a bug.
+            // THIS IS A HACK
+            let magic_number_nobody_will_ever_understand = 110;
+            let mut end = self.proposals.len();
+            if end > magic_number_nobody_will_ever_understand {
+                end = magic_number_nobody_will_ever_understand;
+            }
             // drain the proposals (consume all)
-            for proposal in self.proposals.drain(..) {
+            for proposal in self.proposals.drain(..end) {
                 let id = proposal.id();
-                let node_id = proposal.origin();
-                let answer = match proposal.apply_on(raft_group) {
+                let origin = proposal.origin();
+                let answer = match proposal.apply_on(self.raft_group.as_mut().unwrap()) {
                     None => {
                         // if applying was successful:
                         // add to proposed vector when proposal originated by us
-                        if node_id == raft_group.raft.id {
+                        if node_id == origin {
                             self.proposed.push(id);
                         }
                         continue;
@@ -317,29 +320,33 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                     Some(answer) => answer,
                 };
                 // the client who initiated the proposal is connected to us
-                if node_id == raft_group.raft.id {
-                    // if applying was not successful, tell the client
-                    Self::send_response(&mut self.response_txs, &mut self.response_wakers, self.name.clone(), answer)?;
+                if node_id == origin {
+                    // if applying was not successful, prepare to tell the client
+                    my_answers.push(answer);
                 } else {
                     self.transports
-                        .get(&node_id)
+                        .get(&origin)
                         .ok_or(NodeError::NoTransportForNode {
-                            other_node: node_id,
-                            this_node: raft_group.raft.id,
+                            other_node: origin,
+                            this_node: node_id,
                         })
                         .and_then(|transport| {
                             transport.send(TransportItem::Answer(answer))
                                 .map_err(|e| NodeError::AnswerForwarding {
-                                    origin_node: node_id,
-                                    this_node: raft_group.raft.id,
+                                    origin_node: origin,
+                                    this_node: node_id,
                                     cause: e,
                                 })
                         })?;
                 }
             }
+
+            for answer in my_answers.drain(..) {
+                self.send_response(answer)?;
+            }
         } else {
             // if we know some leader
-            match self.transports.get(&raft_group.raft.leader_id) {
+            match self.transports.get(&self.raft_group.as_ref().unwrap().raft.leader_id) {
                 Some(leader) => {
                     let name = &self.name;
                     // forward proposals to leader
@@ -357,7 +364,7 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                 },
                 None => {
                     // display the warning only after first leader election
-                    if raft_group.raft.leader_id > 0 {
+                    if self.raft_group.as_ref().unwrap().raft.leader_id > 0 {
                         log::warn!("Transport of leader not available, retrying on next tick...");
                     }
                 },
@@ -375,29 +382,37 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
     }
 
     fn on_ready(&mut self) -> NodeResult<()> {
-        let raft_group = match self.raft_group {
-            Some(ref mut raft_group) => raft_group,
-            None => unreachable!(),
-        };
-
         // TODO: implement full processing-the-ready-state chapter from raft documentation
 
         // if raft is not initialized, return
-        if !raft_group.has_ready() {
+        if !self.raft_group.as_ref().unwrap().has_ready() {
             return Ok(());
         }
 
         // get the `Ready` with `RawNode::ready` interface.
-        let mut ready = raft_group.ready();
+        let mut ready = self.raft_group.as_mut().unwrap().ready();
 
-        // persistent raft logs. It's necessary because in `RawNode::advance` we stabilize
-        // raft logs to the latest position.
-        raft_group.raft.raft_log.store
-            .writable()
-            .append(ready.entries())
-            .map_err(|e| NodeError::StorageAppend {
-                cause: e,
-            })?;
+        {
+            let store = &mut self.raft_group.as_mut().unwrap().raft.raft_log.store;
+
+            // persistent raft logs. It's necessary because in `RawNode::advance` we stabilize
+            // raft logs to the latest position.
+            store.writable()
+                .append(ready.entries())
+                .map_err(|e| NodeError::StorageAppend {
+                    cause: e,
+                })?;
+
+            // apply the snapshot. It's necessary because in `RawNode::advance` we stabilize the snapshot.
+            if *ready.snapshot() != Snapshot::new_() {
+                let s = ready.snapshot().clone();
+                store.writable()
+                    .set_snapshot(s)
+                    .map_err(|e| NodeError::StorageSnapshot {
+                        cause: e,
+                    })?;
+            }
+        }
 
         // send out the messages from this node
         for msg in ready.messages.drain(..) {
@@ -409,7 +424,7 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
 
         // apply all committed proposals
         if let Some(committed_entries) = ready.committed_entries.take() {
-            for entry in committed_entries {
+            for entry in &committed_entries {
                 if entry.get_data().is_empty() {
                     // from new elected leaders.
                     continue;
@@ -425,13 +440,13 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                                 let node_id = cc.get_node_id();
                                 match cc.get_change_type() {
                                     ConfChangeType::AddNode => {
-                                        raft_group.raft.add_node(node_id)
+                                        self.raft_group.as_mut().unwrap().raft.add_node(node_id)
                                     },
                                     ConfChangeType::RemoveNode => {
-                                        raft_group.raft.remove_node(node_id)
+                                        self.raft_group.as_mut().unwrap().raft.remove_node(node_id)
                                     },
                                     ConfChangeType::AddLearnerNode => {
-                                        raft_group.raft.add_learner(node_id)
+                                        self.raft_group.as_mut().unwrap().raft.add_learner(node_id)
                                     },
                                     ConfChangeType::BeginMembershipChange
                                         | ConfChangeType::FinalizeMembershipChange => {
@@ -441,6 +456,20 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                             })
                             .map_err(|e| NodeError::ProposalCommit {
                                 node_name: name,
+                                cause: e,
+                            })?;
+                        let cs = ConfState::from(
+                            self.raft_group
+                                .as_ref()
+                                .unwrap()
+                                .raft.prs()
+                                .configuration()
+                                .clone()
+                        );
+                        self.raft_group.as_mut().unwrap().raft.raft_log.store
+                            .writable()
+                            .set_conf_state(cs)
+                            .map_err(|e| NodeError::StorageState {
                                 cause: e,
                             })?;
                     },
@@ -466,19 +495,34 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
 
                 // if the context contains our node_id and one of our proposed proposals
                 // answer the client
-                if node_id == raft_group.raft.id && self.proposed.contains(&proposal_id) {
-                    log::info!("committed proposal {}", proposal_id);
-                    Self::send_response(&mut self.response_txs, &mut self.response_wakers, self.name.clone(), Answer {
+                if node_id == self.raft_group.as_ref().unwrap().raft.id && self.proposed.contains(&proposal_id) {
+                    self.send_response(Answer {
                         id: proposal_id,
                         kind: AnswerKind::Success,
                     })?;
                     self.proposed.remove_item(&proposal_id);
                 }
             }
+
+            if let Some(last_committed) = committed_entries.last() {
+                let store = self.raft_group
+                    .as_mut()
+                    .unwrap()
+                    .raft
+                    .raft_log
+                    .store
+                    .writable();
+
+                store.set_hard_state(HardState {
+                    commit: last_committed.get_index(),
+                    term: last_committed.get_term(),
+                    ..store.hard_state().clone()
+                }).map_err(|e| NodeError::StorageState { cause: e })?;
+            }
         }
 
         // call `RawNode::advance` interface to update position flags in the raft.
-        raft_group.advance(ready);
+        self.raft_group.as_mut().unwrap().advance(ready);
 
         Ok(())
     }
