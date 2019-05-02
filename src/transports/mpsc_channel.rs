@@ -43,15 +43,15 @@ impl<M: MachineCore> MpscChannelTransport<M> {
 }
 
 impl<M: MachineCore> Transport<M> for MpscChannelTransport<M> {
-    fn send(&self, item: TransportItem<M>) -> Result<(), TransportError> {
+    fn send(&mut self, item: TransportItem<M>) -> Result<(), TransportError> {
         self.send.send(item).map_err(|_| TransportError::Disconnected)
     }
 
-    fn recv(&self) -> Result<TransportItem<M>, TransportError> {
+    fn recv(&mut self) -> Result<TransportItem<M>, TransportError> {
         self.recv.recv().map_err(|_| TransportError::Disconnected)
     }
 
-    fn try_recv(&self) -> Result<TransportItem<M>, TransportError> {
+    fn try_recv(&mut self) -> Result<TransportItem<M>, TransportError> {
         self.recv.try_recv().map_err(|e| {
             match e {
                 TryRecvError::Empty => TransportError::Empty,

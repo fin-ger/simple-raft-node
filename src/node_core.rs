@@ -247,7 +247,7 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
         let mut messages = Vec::new();
         let mut answers = Vec::new();
 
-        'transports: for (_, transport) in &self.transports {
+        'transports: for (_, transport) in self.transports.iter_mut() {
             loop {
                 // step raft messages and save forwarded proposals
                 match transport.try_recv() {
@@ -325,7 +325,7 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
                     my_answers.push(answer);
                 } else {
                     self.transports
-                        .get(&origin)
+                        .get_mut(&origin)
                         .ok_or(NodeError::NoTransportForNode {
                             other_node: origin,
                             this_node: node_id,
@@ -346,7 +346,7 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
             }
         } else {
             // if we know some leader
-            match self.transports.get(&self.raft_group.as_ref().unwrap().raft.leader_id) {
+            match self.transports.get_mut(&self.raft_group.as_ref().unwrap().raft.leader_id) {
                 Some(leader) => {
                     let name = &self.name;
                     // forward proposals to leader
@@ -417,7 +417,7 @@ impl<M: MachineCore, T: Transport<M>, S: Storage> NodeCore<M, T, S> {
         // send out the messages from this node
         for msg in ready.messages.drain(..) {
             let to = msg.get_to();
-            if self.transports[&to].send(TransportItem::Message(msg)).is_err() {
+            if self.transports.get_mut(&to).unwrap().send(TransportItem::Message(msg)).is_err() {
                 log::warn!("send raft message to {} fail, let raft retry it", to);
             }
         }

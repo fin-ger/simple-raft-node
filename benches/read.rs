@@ -7,17 +7,22 @@ use simple_raft_node::machines::HashMapMachine;
 use simple_raft_node::storages::MemStorage;
 use simple_raft_node::{Node};
 
+use serde::{Serialize, Deserialize};
 use test::Bencher;
 
 // One kilobyte in size
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Value {
-    content: [i64, 128];
+    content1: [i64; 32],
+    content2: [i64; 32],
+    content3: [i64; 32],
+    content4: [i64; 32],
 }
 
 #[bench]
 fn read(b: &mut Bencher) {
     let _ = env_logger::builder().is_test(true).try_init();
-    let nodes: Vec<Node<HashMapMachine<i64, String>>> = MpscChannelTransport::create_transports(
+    let nodes: Vec<Node<HashMapMachine<i64, Value>>> = MpscChannelTransport::create_transports(
         vec![1, 2, 3, 4, 5]
     )
         .drain()
@@ -36,11 +41,10 @@ fn read(b: &mut Bencher) {
     let _ = runtime::raw::enter(runtime::native::Native, async move {
         // Put 5 key-value pairs.
         let mut handles = Vec::new();
-        for i in 0..10000 {
+        for i in 0..1000 {
             let machine = machine.clone();
             handles.push(runtime::spawn(async move {
-                let content = format!("hello, world {}", i);
-                await!(machine.put(i, content.clone()))
+                await!(machine.put(i, Default::default()))
             }));
         }
 
@@ -52,7 +56,7 @@ fn read(b: &mut Bencher) {
     b.iter(move || {
         let machine = nodes[0].machine().clone();
         let _ = runtime::raw::enter(runtime::native::Native, async move {
-            let handles: Vec<_> = (0..10000)
+            let handles: Vec<_> = (0..1000)
                 .map(|i| {
                     let machine = machine.clone();
                     runtime::spawn(async move {

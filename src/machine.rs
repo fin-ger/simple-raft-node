@@ -159,11 +159,11 @@ pub trait Machine: Send + Clone + std::fmt::Debug {
     fn core(&self) -> Self::Core;
 }
 
-pub trait MachineItem = std::fmt::Debug + Serialize + DeserializeOwned + Clone + Send + Unpin;
+pub trait MachineItem = std::fmt::Debug + Clone + Send + Unpin;
 
 // the core has to own all its data
 pub trait MachineCore: std::fmt::Debug + Clone + Send +'static {
-    type StateChange: MachineItem;
+    type StateChange: MachineItem + Serialize + DeserializeOwned;
     type StateIdentifier: MachineItem;
     type StateValue: MachineItem;
 

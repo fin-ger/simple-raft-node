@@ -41,7 +41,9 @@ impl TryFrom<&[u8]> for Context {
 }
 
 #[derive(Serialize, Deserialize)]
-enum ProposalKind<M: MachineCore> {
+pub enum ProposalKind<M: MachineCore> {
+    #[serde(bound(deserialize = "M::StateChange: Deserialize<'de>"))]
+    #[serde(bound(serialize = "M::StateChange: Serialize"))]
     StateChange(M::StateChange),
     ConfChange(#[serde(with = "ConfChangePolyfill")] ConfChange),
     TransferLeader(u64),
@@ -50,6 +52,8 @@ enum ProposalKind<M: MachineCore> {
 #[derive(Serialize, Deserialize)]
 pub struct Proposal<M: MachineCore> {
     context: Context,
+    #[serde(bound(deserialize = "ProposalKind<M>: Deserialize<'de>"))]
+    #[serde(bound(serialize = "ProposalKind<M>: Serialize"))]
     kind: ProposalKind<M>,
 }
 
