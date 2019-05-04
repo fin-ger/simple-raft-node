@@ -1,4 +1,4 @@
-use std::sync::mpsc::{self, Sender, Receiver, TryRecvError};
+/*use std::sync::mpsc::{self, Sender, Receiver, TryRecvError};
 use std::collections::HashMap;
 
 use crate::{Transport, TransportItem, TransportError, MachineCore};
@@ -67,4 +67,4 @@ impl<M: MachineCore> Transport<M> for MpscChannelTransport<M> {
     fn dest(&self) -> u64 {
         self.dest
     }
-}
+}*/

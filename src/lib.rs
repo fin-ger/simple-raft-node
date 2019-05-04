@@ -12,6 +12,7 @@
 // limitations under the License.
 #![feature(vec_remove_item, trait_alias, fn_traits, async_await, await_macro)]
 
+mod request;
 mod proposal;
 mod node_error;
 mod node_core;
@@ -29,6 +30,7 @@ pub use proposal::*;
 pub use machine::*;
 pub use transport::*;
 pub use storage::*;
+pub use request::*;
 
 use std::thread::{self, JoinHandle};
 use std::sync::{Arc, Mutex};
@@ -39,35 +41,35 @@ use crossbeam::channel;
 use node_core::NodeCore;
 
 pub struct Node<M: Machine> {
-    name: String,
+    id: u64,
     machine: M,
     handle: Option<JoinHandle<()>>,
     is_running: Arc<Mutex<bool>>,
+    request_manager: RequestManager<M::Core>,
 }
 
 impl<M: Machine> Node<M> {
-    pub fn new<IntoString: Into<String>, T: Transport<M::Core> + 'static, S: Storage + 'static>(
-        name: IntoString,
+    pub fn new<C: ConnectionManager<M::Core> + 'static, S: Storage + 'static>(
+        id: u64,
         mut machine: M,
         storage: S,
-        transports: Vec<T>,
+        connection_manager: C,
     ) -> Self {
-        let (response_tx, response_rx) = channel::unbounded();
+        let (request_tx, request_rx) = channel::unbounded();
         let config = Config {
             election_tick: 10,
             heartbeat_tick: 3,
             ..Default::default()
         };
-        machine.init(RequestManager::new(response_tx));
-        let name_s = name.into();
+        machine.init(RequestManager::new(request_tx.clone()));
 
         let mut node = NodeCore::new(
-            name_s.clone(),
+            id,
             config,
             machine.core(),
             storage,
-            transports,
-            response_rx,
+            connection_manager,
+            request_rx,
         ).unwrap();
 
         let is_running = Arc::new(Mutex::new(true));
@@ -82,7 +84,7 @@ impl<M: Machine> Node<M> {
                 match node.advance() {
                     Ok(()) => {},
                     Err(err) => {
-                        log::error!("advance of node failed: {}", err);
+                        log::error!("advance of node {} failed: {}", id, err);
                         break;
                     },
                 };
@@ -90,25 +92,22 @@ impl<M: Machine> Node<M> {
         });
 
         Self {
-            name: name_s,
+            id,
             machine,
             handle: Some(handle),
             is_running: is_running_copy,
+            request_manager: RequestManager::new(request_tx),
         }
     }
 
     pub fn machine(&self) -> &M {
         &self.machine
     }
-
-    pub fn name(&self) -> &String {
-        &self.name
-    }
 }
 
 impl<M: Machine> Drop for Node<M> {
     fn drop(&mut self) {
-        log::info!("{} is shutting down...", self.name);
+        log::info!("node {} is shutting down...", self.id);
         *self.is_running.lock().unwrap() = false;
         self.handle.take().unwrap().join().unwrap();
     }

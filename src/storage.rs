@@ -52,7 +52,7 @@ pub struct WriteError;
 pub trait Storage: Default + Send + Sized {
     type InitError;
 
-    fn init<IntoString: Into<String>>(&mut self, node_name: IntoString) -> Result<(), Self::InitError>;
+    fn init(&mut self, node_id: u64) -> Result<(), Self::InitError>;
     fn hard_state<'a>(&'a self) -> &'a HardState;
     fn set_hard_state(&mut self, hard_state: HardState) -> Result<(), WriteError>;
     fn conf_state<'a>(&'a self) -> &'a ConfState;
@@ -70,9 +70,9 @@ pub trait Storage: Default + Send + Sized {
     fn try_first_index(&self) -> Option<u64>;
     fn try_last_index(&self) -> Option<u64>;
 
-    fn init_with_conf_state<IntoString: Into<String>, IntoConfState: Into<ConfState>>(
+    fn init_with_conf_state<IntoConfState: Into<ConfState>>(
         &mut self,
-        node_name: IntoString,
+        node_id: u64,
         conf_state: IntoConfState,
     ) -> Result<(), Self::InitError> {
         let mut metadata: SnapshotMetadata = Default::default();
@@ -82,7 +82,7 @@ pub trait Storage: Default + Send + Sized {
         let mut snapshot: Snapshot = Default::default();
         snapshot.set_metadata(metadata);
 
-        self.init(node_name)?;
+        self.init(node_id)?;
         // we can unwrap as snapshot will never be out of date
         self.set_snapshot(snapshot).unwrap();
 

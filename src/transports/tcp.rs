@@ -1,4 +1,4 @@
-use std::net::{TcpStream, Shutdown};
+/*use std::net::{TcpStream, Shutdown};
 use std::io::{Read, Write};
 
 use crate::{Transport, TransportItem, TransportError, MachineCore};
@@ -29,13 +29,13 @@ impl<M: MachineCore> Transport<M> for TcpTransport<M> {
     fn send(&mut self, item: TransportItem<M>) -> Result<(), TransportError> {
         let data = bincode::serialize(&item).map_err(|e| {
             log::error!("failed to serialize transport item: {}", e);
-            self.stream.shutdown(Shutdown::Both);
+            let _ = self.stream.shutdown(Shutdown::Both);
             TransportError::Disconnected
         })?;
         self.stream.write_all(&data)
             .map_err(|e| {
                 log::error!("failed to write serialized transport item to TCP stream: {}", e);
-                self.stream.shutdown(Shutdown::Both);
+                let _ = self.stream.shutdown(Shutdown::Both);
                 TransportError::Disconnected
             })
     }
@@ -44,14 +44,14 @@ impl<M: MachineCore> Transport<M> for TcpTransport<M> {
         self.stream.read_exact(&mut self.buf)
             .map_err(|e| {
                 log::error!("failed to read from TCP transport: {}", e);
-                self.stream.shutdown(Shutdown::Both);
+                let _ = self.stream.shutdown(Shutdown::Both);
                 TransportError::Disconnected
             })?;
 
         bincode::deserialize(&self.buf)
             .map_err(|e| {
                 log::error!("failed to deserialize transport item from TCP stream: {}", e);
-                self.stream.shutdown(Shutdown::Both);
+                let _ = self.stream.shutdown(Shutdown::Both);
                 TransportError::Disconnected
             })
     }
@@ -60,7 +60,7 @@ impl<M: MachineCore> Transport<M> for TcpTransport<M> {
         let size = self.stream.peek(&mut self.buf)
             .map_err(|e| {
                 log::error!("failed to peek on TCP transport: {}", e);
-                self.stream.shutdown(Shutdown::Both);
+                let _ = self.stream.shutdown(Shutdown::Both);
                 TransportError::Disconnected
             })?;
 
@@ -78,4 +78,4 @@ impl<M: MachineCore> Transport<M> for TcpTransport<M> {
     fn dest(&self) -> u64 {
         self.dest
     }
-}
+}*/

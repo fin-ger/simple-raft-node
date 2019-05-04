@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+/*use std::collections::HashMap;
 
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
@@ -121,3 +121,4 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
             .ok_or(MachineError::StateRetrieval)
     }
 }
+*/

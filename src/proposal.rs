@@ -6,19 +6,19 @@ use raft::{eraftpb::ConfChange, RawNode};
 use crate::serde_polyfill::ConfChangePolyfill;
 use crate::MachineCore;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum AnswerKind {
     Success,
     Fail,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Answer {
     pub id: u64,
     pub kind: AnswerKind,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Context {
     pub proposal_id: u64,
     pub node_id: u64,
@@ -40,7 +40,7 @@ impl TryFrom<&[u8]> for Context {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum ProposalKind<M: MachineCore> {
     #[serde(bound(deserialize = "M::StateChange: Deserialize<'de>"))]
     #[serde(bound(serialize = "M::StateChange: Serialize"))]
@@ -49,7 +49,7 @@ pub enum ProposalKind<M: MachineCore> {
     TransferLeader(u64),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Proposal<M: MachineCore> {
     context: Context,
     #[serde(bound(deserialize = "ProposalKind<M>: Deserialize<'de>"))]

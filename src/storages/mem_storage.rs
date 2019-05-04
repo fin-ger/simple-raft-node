@@ -31,10 +31,7 @@ pub struct MemStorage {
 impl Storage for MemStorage {
     type InitError = ();
 
-    fn init<IntoString: Into<String>>(
-        &mut self,
-        _node_name: IntoString,
-    ) -> Result<(), Self::InitError> {
+    fn init(&mut self, _node_id: u64) -> Result<(), Self::InitError> {
         // we ignore the node_name here as we don't need an identifier for the node to load
         // old state e.g. from disk
         Ok(())
