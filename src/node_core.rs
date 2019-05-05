@@ -4,6 +4,7 @@ use std::convert::TryInto;
 use std::task::Waker;
 use std::thread;
 
+use failure::Backtrace;
 use crossbeam::channel::{Receiver, Sender};
 use protobuf::Message as PbMessage;
 use raft::{StateRole, RawNode, Config};
@@ -78,12 +79,17 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             .map_err(|e| NodeError::Storage {
                 node_id: id,
                 cause: Box::new(e),
+                backtrace: Backtrace::new(),
             })?;
         let wrapped_storage = WrappedStorage::new(storage);
 
         let raft_group = Some(
             RawNode::new(&cfg, wrapped_storage)
-                .map_err(|e| NodeError::Raft { node_id: id, cause: e })?
+                .map_err(|e| NodeError::Raft {
+                    node_id: id,
+                    cause: e,
+                    backtrace: Backtrace::new(),
+                })?
         );
 
         Ok(Self {
@@ -131,6 +137,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 .map_err(|e| NodeError::Raft {
                     node_id: self.id,
                     cause: e,
+                    backtrace: Backtrace::new(),
                 })?
         );
 
@@ -148,6 +155,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             .map_err(|e| NodeError::Raft {
                 node_id: self.id,
                 cause: e,
+                backtrace: Backtrace::new(),
             })
     }
 
@@ -158,14 +166,23 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         };
         self.response_txs
             .remove(&answer.id)
-            .ok_or(NodeError::AnswerDelivery { node_id: self.id })
+            .ok_or(NodeError::AnswerDelivery {
+                node_id: self.id,
+                backtrace: Backtrace::new(),
+            })
             .and_then(|tx| {
                 tx.send(response)
-                    .map_err(|_| NodeError::AnswerDelivery { node_id: self.id })
+                    .map_err(|_| NodeError::AnswerDelivery {
+                        node_id: self.id,
+                        backtrace: Backtrace::new(),
+                    })
             })?;
         self.response_wakers
             .remove(&answer.id)
-            .ok_or(NodeError::AnswerDelivery { node_id: self.id })
+            .ok_or(NodeError::AnswerDelivery {
+                node_id: self.id,
+                backtrace: Backtrace::new(),
+            })
             .and_then(|waker| {
                 Ok(waker.wake())
             })
@@ -202,7 +219,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         Err(_) => Response::StateRetrieval(StateRetrievalResult::NotFound),
                     };
                     request.response_tx.send(response)
-                        .map_err(|_| NodeError::AnswerDelivery { node_id: self.id })?;
+                        .map_err(|_| NodeError::AnswerDelivery {
+                            node_id: self.id,
+                            backtrace: Backtrace::new(),
+                        })?;
                     request.waker.wake();
                 },
             }
@@ -245,6 +265,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 node_id,
                                 other_node: new_node_id,
                                 cause: Box::new(e),
+                                backtrace: Backtrace::new(),
                             })?;
                         let mut conf_change = ConfChange::new();
                         conf_change.set_node_id(new_node_id);
@@ -260,8 +281,8 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         self.new_transports.remove(i);
                         continue;
                     },
-                    Err(TransportError::Empty) => {},
-                    Err(TransportError::Disconnected) => {
+                    Err(TransportError::Empty(_)) => {},
+                    Err(TransportError::Disconnected(_)) => {
                         self.new_transports.remove(i);
                         continue;
                     }
@@ -290,8 +311,8 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         );
                         to_disconnect.push(*tp_id);
                     }
-                    Err(TransportError::Empty) => break,
-                    Err(TransportError::Disconnected) => {
+                    Err(TransportError::Empty(_)) => break,
+                    Err(TransportError::Disconnected(_)) => {
                         //log::warn!("host for raft {} is down!", transport.dest());
                         break;
                     },
@@ -368,6 +389,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 origin_node: origin,
                                 this_node: node_id,
                                 cause: e,
+                                backtrace: Backtrace::new(),
                             })?;
                     } else {
                         log::warn!(
@@ -392,6 +414,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             .map_err(|e| NodeError::ProposalForwarding {
                                 node_id: node_id,
                                 cause: e,
+                                backtrace: Backtrace::new(),
                             })?;
                         // proposal was forwarded and can therefore be put in our proposed
                         // list to prepare for client answer
@@ -438,6 +461,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 .map_err(|e| NodeError::Storage {
                     node_id: node_id,
                     cause: Box::new(e),
+                    backtrace: Backtrace::new(),
                 })?;
 
             // apply the snapshot. It's necessary because in `RawNode::advance` we stabilize the snapshot.
@@ -448,6 +472,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     .map_err(|e| NodeError::Storage {
                         node_id: node_id,
                         cause: Box::new(e),
+                        backtrace: Backtrace::new(),
                     })?;
             }
         }
@@ -475,6 +500,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             .map_err(|e| NodeError::ConfChange {
                                 node_id,
                                 cause: Box::new(e),
+                                backtrace: Backtrace::new(),
                             })?;
 
                         let node_id = cc.get_node_id();
@@ -485,6 +511,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                     .map_err(|e| NodeError::ConfChange {
                                         node_id,
                                         cause: Box::new(e),
+                                        backtrace: Backtrace::new(),
                                     })?;
 
                                 let pos = self.new_transports
@@ -497,6 +524,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                         .map_err(|e| NodeError::ConfChange {
                                             node_id,
                                             cause: Box::new(e),
+                                            backtrace: Backtrace::new(),
                                         })?
                                 };
 
@@ -518,6 +546,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         }.map_err(|e| NodeError::ConfChange {
                             node_id,
                             cause: Box::new(e),
+                            backtrace: Backtrace::new(),
                         })?;
 
                         let cs = ConfState::from(
@@ -534,6 +563,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             .map_err(|e| NodeError::Storage {
                                 node_id,
                                 cause: Box::new(e),
+                                backtrace: Backtrace::new(),
                             })?;
                     },
                     EntryType::EntryNormal => {
@@ -542,6 +572,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             .map_err(|e| NodeError::ConfChange {
                                 node_id,
                                 cause: Box::new(e),
+                                backtrace: Backtrace::new(),
                             })?;
                         self.machine.apply(state_change);
                     },
@@ -558,10 +589,11 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 if node_id == self.raft_group.as_ref().unwrap().raft.id
                     && self.proposed.contains(&proposal_id)
                 {
-                    self.send_response(Answer {
+                    // ignore when sending the answer was not successful
+                    let _ = self.send_response(Answer {
                         id: proposal_id,
                         kind: AnswerKind::Success,
-                    })?;
+                    });
                     self.proposed.remove_item(&proposal_id);
                 }
             }
@@ -582,6 +614,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 }).map_err(|e| NodeError::Storage {
                     node_id,
                     cause: Box::new(e),
+                    backtrace: Backtrace::new(),
                 })?;
             }
         }

@@ -1,6 +1,6 @@
 use raft::eraftpb::Message;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
-use failure::Fail;
+use failure::{Fail, Backtrace};
 
 use crate::serde_polyfill::MessagePolyfill;
 use crate::{Proposal, Answer, AnswerKind, MachineCore};
@@ -24,17 +24,14 @@ impl<M: MachineCore> Default for TransportItem<M> {
 #[derive(Debug, Fail)]
 pub enum TransportError {
     #[fail(display = "Failed to receive or send item over transport, as the transport is disconnected")]
-    Disconnected,
+    Disconnected(Backtrace),
     #[fail(display = "Failed to receive item over transport, as the transport is empty")]
-    Empty,
+    Empty(Backtrace),
 }
 
 #[derive(Debug, Fail)]
 #[fail(display = "Failed to establish a connection")]
-pub struct ConnectError {
-    #[cause]
-    pub cause: Box<Fail>,
-}
+pub struct ConnectError(#[cause] pub Box<Fail>, pub Backtrace);
 
 pub trait ConnectionManager<M: MachineCore>: Send {
     type Transport: Transport<M>;

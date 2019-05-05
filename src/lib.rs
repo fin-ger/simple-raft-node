@@ -42,6 +42,7 @@ pub use request::*;
 use std::thread::{self, JoinHandle};
 use std::sync::{Arc, Mutex};
 
+use failure::Fail;
 use raft::Config;
 use crossbeam::channel;
 
@@ -90,7 +91,7 @@ impl<M: Machine> Node<M> {
                 match node.advance() {
                     Ok(()) => {},
                     Err(err) => {
-                        log::error!("advance of node {} failed: {}", id, err);
+                        log::error!("advance of node {} failed: {}", id, err.backtrace().unwrap());
                         break;
                     },
                 };

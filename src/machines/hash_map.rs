@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use failure::Backtrace;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::{
@@ -56,7 +57,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
             return await!(machine::apply(mngr, HashMapStateChange::Put(key, value)));
         }
 
-        Err(RequestError::ChannelsUnavailable)
+        Err(RequestError::ChannelsUnavailable(Backtrace::new()))
     }
 
     pub async fn delete(&self, key: K) -> RequestResult<()> {
@@ -64,7 +65,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
             return await!(machine::apply(mngr, HashMapStateChange::Delete(key)));
         }
 
-        Err(RequestError::ChannelsUnavailable)
+        Err(RequestError::ChannelsUnavailable(Backtrace::new()))
     }
 
     pub async fn get(&self, key: K) -> RequestResult<V> {
@@ -72,7 +73,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
             return await!(machine::retrieve(mngr, key));
         }
 
-        Err(RequestError::ChannelsUnavailable)
+        Err(RequestError::ChannelsUnavailable(Backtrace::new()))
     }
 }
 
@@ -119,6 +120,6 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
 
     fn retrieve(&self, state_identifier: &K) -> Result<&V, RequestError> {
         self.hash_map.get(state_identifier)
-            .ok_or(RequestError::StateRetrieval)
+            .ok_or(RequestError::StateRetrieval(Backtrace::new()))
     }
 }

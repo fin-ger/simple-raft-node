@@ -1,4 +1,4 @@
-use failure::Fail;
+use failure::{Fail, Backtrace};
 
 use crate::{
     Storage,
@@ -16,7 +16,9 @@ use crate::{
 
 #[derive(Debug, Fail)]
 #[fail(display = "memory storage failed (this will never happen)")]
-pub struct MemStorageError;
+pub struct MemStorageError {
+    backtrace: Backtrace,
+}
 
 #[derive(Default)]
 pub struct MemStorage {
@@ -73,7 +75,7 @@ impl Storage for MemStorage {
         let metadata = snapshot.get_metadata();
 
         if self.first_index() > metadata.get_index() {
-            return Err(SnapshotWriteError::OutOfDate);
+            return Err(SnapshotWriteError::OutOfDate(Backtrace::new()));
         }
 
         self.snapshot_metadata = metadata.clone();
@@ -95,6 +97,7 @@ impl Storage for MemStorage {
             return Err(EntryWriteError::AlreadyCompacted {
                 compacted_index: self.first_index() - 1,
                 entry_index: entries[0].get_index(),
+                backtrace: Backtrace::new(),
             });
         }
 
@@ -102,6 +105,7 @@ impl Storage for MemStorage {
             return Err(EntryWriteError::NotContinuous {
                 last_entry: self.last_index(),
                 entry_index: entries[0].get_index(),
+                backtrace: Backtrace::new(),
             });
         }
 
@@ -121,7 +125,7 @@ impl Storage for MemStorage {
         if let Some(offset) = self.try_first_index() {
             if low >= offset {
                 if high > self.last_index() + 1 {
-                    return Err(EntryReadError::OutOfBounds);
+                    return Err(EntryReadError::OutOfBounds(Backtrace::new()));
                 }
 
                 let lo = (low - offset) as usize;
@@ -133,7 +137,7 @@ impl Storage for MemStorage {
             }
         }
 
-        Err(EntryReadError::Compacted)
+        Err(EntryReadError::Compacted(Backtrace::new()))
     }
 
     fn try_first_index(&self) -> Option<u64> {

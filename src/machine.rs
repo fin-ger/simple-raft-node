@@ -1,5 +1,5 @@
 use serde::{Serialize, de::DeserializeOwned};
-use failure::Fail;
+use failure::{Fail, Backtrace};
 
 use crate::{
     RequestManager,
@@ -35,7 +35,7 @@ pub async fn apply<M: MachineCore>(
         |result| {
             match result {
                 Response::StateChange(GeneralResult::Success) => Ok(()),
-                _ => Err(RequestError::StateChange),
+                _ => Err(RequestError::StateChange(Backtrace::new())),
             }
         },
     ))
@@ -50,7 +50,7 @@ pub async fn retrieve<M: MachineCore>(
         |result| {
             match result {
                 Response::StateRetrieval(StateRetrievalResult::Found(value)) => Ok(value),
-                _ => Err(RequestError::StateRetrieval),
+                _ => Err(RequestError::StateRetrieval(Backtrace::new())),
             }
         },
     ))

@@ -1,25 +1,25 @@
 pub use raft::eraftpb::{Snapshot, SnapshotMetadata, Entry};
 pub use raft::eraftpb::{ConfState, HardState};
 use raft::storage::RaftState;
-use failure::Fail;
+use failure::{Fail, Backtrace};
 
 #[derive(Debug, Fail)]
 pub enum EntryReadError {
     #[fail(display = "The entry was compacted into a snapshot and is not accessible any more!")]
-    Compacted,
+    Compacted(Backtrace),
     #[fail(display = "Entry index is out of bounds")]
-    OutOfBounds,
+    OutOfBounds(Backtrace),
 }
 
 #[derive(Debug, Fail)]
 pub enum SnapshotReadError {
     #[fail(display = "The snapshot is temporarily unavailable, but may be available later on.")]
-    SnapshotTemporarilyUnavailable,
+    SnapshotTemporarilyUnavailable(Backtrace),
 }
 
 #[derive(Debug, Fail)]
 #[fail(display = "The state cannot be read from the storage!")]
-pub struct ReadError;
+pub struct ReadError(Backtrace);
 
 #[derive(Debug, Fail)]
 pub enum EntryWriteError {
@@ -27,27 +27,31 @@ pub enum EntryWriteError {
     AlreadyCompacted {
         compacted_index: u64,
         entry_index: u64,
+        backtrace: Backtrace,
     },
     #[fail(display = "The new entry is not continuous to the last known log entry! The last entry of the log is {}, but the new entry is {}.", last_entry, entry_index)]
     NotContinuous {
         last_entry: u64,
         entry_index: u64,
+        backtrace: Backtrace,
     },
     #[fail(display = "The entry could not be written by the storage!")]
-    Write,
+    Write {
+        backtrace: Backtrace,
+    },
 }
 
 #[derive(Debug, Fail)]
 pub enum SnapshotWriteError {
     #[fail(display = "The snapshot that was about to be applied is out of date!")]
-    OutOfDate,
+    OutOfDate(Backtrace),
     #[fail(display = "The snapshot could not be written by the storage!")]
-    Write,
+    Write(Backtrace),
 }
 
 #[derive(Debug, Fail)]
 #[fail(display = "The state could not be written by the storage!")]
-pub struct WriteError;
+pub struct WriteError(Backtrace);
 
 pub trait Storage: Default + Send + Sized {
     type InitError: Fail;
@@ -136,7 +140,7 @@ impl<T: Storage> raft::Storage for WrappedStorage<T> {
         self.storage.entries(low, high, max_size)
             .map_err(|e| {
                 match e {
-                    EntryReadError::Compacted => raft::StorageError::Compacted.into(),
+                    EntryReadError::Compacted(_) => raft::StorageError::Compacted.into(),
                     e => panic!("{}", e),
                 }
             })
@@ -181,7 +185,7 @@ impl<T: Storage> raft::Storage for WrappedStorage<T> {
     fn snapshot(&self) -> raft::Result<Snapshot> {
         match self.storage.snapshot() {
             Ok(snapshot) => Ok(snapshot),
-            Err(SnapshotReadError::SnapshotTemporarilyUnavailable) => Err(
+            Err(SnapshotReadError::SnapshotTemporarilyUnavailable(_)) => Err(
                 raft::StorageError::SnapshotTemporarilyUnavailable.into()
             ),
         }

@@ -50,13 +50,13 @@ async fn main() {
             .map(|i| {
                 let machine = node.machine().clone();
                 runtime::spawn(async move {
-                    (i, await!(machine.get(i)).unwrap())
+                    (i, await!(machine.get(i)).ok())
                 })
             }).collect();
         log::info!("node {} {{", id);
         for handle in handles {
             let (key, value) = await!(handle);
-            log::info!("  {}: {}", key, value);
+            log::info!("  {}: {:?}", key, value);
         }
         log::info!("}}");
     }

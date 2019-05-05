@@ -2,7 +2,7 @@ use std::future::Future;
 use std::task::{Poll, Context, Waker};
 use std::pin::Pin;
 
-use failure::Fail;
+use failure::{Fail, Backtrace};
 use crossbeam::channel::{self, Sender, Receiver, TryRecvError};
 
 use crate::{MachineCore};
@@ -10,11 +10,11 @@ use crate::{MachineCore};
 #[derive(Debug, Fail)]
 pub enum RequestError {
     #[fail(display = "The proposal channels are not available")]
-    ChannelsUnavailable,
+    ChannelsUnavailable(Backtrace),
     #[fail(display = "The proposed state change failed")]
-    StateChange,
+    StateChange(Backtrace),
     #[fail(display = "The proposed state retrieval failed")]
-    StateRetrieval,
+    StateRetrieval(Backtrace),
 }
 
 pub type RequestResult<T> = Result<T, RequestError>;
@@ -94,14 +94,16 @@ impl<M: MachineCore, V: Sized + Unpin + 'static, F: RequestHandler<M, V>>
                 response_tx: fut.response_tx.clone(),
                 waker: cx.waker().clone(),
                 kind: fut.kind.clone(),
-            }).map_err(|_| RequestError::ChannelsUnavailable)?;
+            }).map_err(|_| RequestError::ChannelsUnavailable(Backtrace::new()))?;
             fut.request_sent = true;
         }
 
         match fut.response_rx.try_recv() {
             Ok(response) => Poll::Ready(fut.response_handler.call((response,))),
             Err(TryRecvError::Empty) => Poll::Pending,
-            Err(TryRecvError::Disconnected) => Poll::Ready(Err(RequestError::ChannelsUnavailable)),
+            Err(TryRecvError::Disconnected) => Poll::Ready(Err(
+                RequestError::ChannelsUnavailable(Backtrace::new())
+            )),
         }
     }
 }

@@ -1,4 +1,4 @@
-use failure::Fail;
+use failure::{Fail, Backtrace};
 use crate::TransportError;
 
 #[derive(Debug, Fail)]
@@ -8,10 +8,12 @@ pub enum NodeError {
         node_id: u64,
         #[cause]
         cause: raft::Error,
+        backtrace: Backtrace,
     },
     #[fail(display = "Failed to deliver answer for proposal on node {}", node_id)]
     AnswerDelivery {
         node_id: u64,
+        backtrace: Backtrace,
     },
     #[fail(display = "Failed to forward answer to origin node {} from node {}", origin_node, this_node)]
     AnswerForwarding {
@@ -19,12 +21,14 @@ pub enum NodeError {
         this_node: u64,
         #[cause]
         cause: TransportError,
+        backtrace: Backtrace,
     },
     #[fail(display = "Failed to forward proposal to leader on node {}", node_id)]
     ProposalForwarding {
         node_id: u64,
         #[cause]
         cause: TransportError,
+        backtrace: Backtrace,
     },
     #[fail(display = "Failed to add node {} to cluster on node {}", other_node, node_id)]
     NodeAdd {
@@ -32,12 +36,14 @@ pub enum NodeError {
         other_node: u64,
         #[cause]
         cause: Box<Fail>,
+        backtrace: Backtrace,
     },
     #[fail(display = "A storage failure occurred on node {}", node_id)]
     Storage {
         node_id: u64,
         #[cause]
         cause: Box<Fail>,
+        backtrace: Backtrace,
     },
     // NOTE: this error can be handled in NodeCore by retrying,
     //       so this should not be propagated...
@@ -46,6 +52,7 @@ pub enum NodeError {
         node_id: u64,
         #[cause]
         cause: Box<Fail>,
+        backtrace: Backtrace,
     },
 }
 

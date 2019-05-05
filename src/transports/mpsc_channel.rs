@@ -2,6 +2,8 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Sender, Receiver, TryRecvError};
 use std::collections::HashMap;
 
+use failure::Backtrace;
+
 use crate::{Transport, TransportItem, TransportError, ConnectionManager, ConnectError, MachineCore};
 
 #[derive(Clone)]
@@ -74,12 +76,13 @@ impl<M: MachineCore> ConnectionManager<M> for MpscChannelConnectionManager<M> {
             .get_mut(&self.node_id).unwrap()
             .drain_filter(|t| t.dest_addr() == address)
             .next()
-            .ok_or(ConnectError {
-                cause: Box::new(std::io::Error::new(
+            .ok_or(ConnectError(
+                Box::new(std::io::Error::new(
                     std::io::ErrorKind::ConnectionRefused,
                     "connection not available",
                 )),
-            })
+                Backtrace::new(),
+            ))
     }
 }
 
@@ -94,14 +97,14 @@ impl<M: MachineCore> Transport<M> for MpscChannelTransport<M> {
     type Address = u64;
 
     fn send(&mut self, item: TransportItem<M>) -> Result<(), TransportError> {
-        self.send.send(item).map_err(|_| TransportError::Disconnected)
+        self.send.send(item).map_err(|_| TransportError::Disconnected(Backtrace::new()))
     }
 
     fn try_recv(&mut self) -> Result<TransportItem<M>, TransportError> {
         self.recv.try_recv().map_err(|e| {
             match e {
-                TryRecvError::Empty => TransportError::Empty,
-                TryRecvError::Disconnected => TransportError::Disconnected,
+                TryRecvError::Empty => TransportError::Empty(Backtrace::new()),
+                TryRecvError::Disconnected => TransportError::Disconnected(Backtrace::new()),
             }
         })
     }
