@@ -1,3 +1,5 @@
+use failure::Fail;
+
 use crate::{
     Storage,
     ConfState,
@@ -11,6 +13,10 @@ use crate::{
     EntryReadError,
     EntryWriteError,
 };
+
+#[derive(Debug, Fail)]
+#[fail(display = "memory storage failed (this will never happen)")]
+pub struct MemStorageError;
 
 #[derive(Default)]
 pub struct MemStorage {
@@ -29,7 +35,7 @@ pub struct MemStorage {
 }
 
 impl Storage for MemStorage {
-    type InitError = ();
+    type InitError = MemStorageError;
 
     fn init(&mut self, _node_id: u64) -> Result<(), Self::InitError> {
         // we ignore the node_name here as we don't need an identifier for the node to load

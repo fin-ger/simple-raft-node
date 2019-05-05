@@ -1,5 +1,5 @@
 use failure::Fail;
-use crate::{TransportError, EntryWriteError, SnapshotWriteError, WriteError};
+use crate::TransportError;
 
 #[derive(Debug, Fail)]
 pub enum NodeError {
@@ -8,11 +8,6 @@ pub enum NodeError {
         node_id: u64,
         #[cause]
         cause: raft::Error,
-    },
-    #[fail(display = "No transport registered for node {} on node {}", other_node, this_node)]
-    NoTransportForNode {
-        other_node: u64,
-        this_node: u64,
     },
     #[fail(display = "Failed to deliver answer for proposal on node {}", node_id)]
     AnswerDelivery {
@@ -31,38 +26,18 @@ pub enum NodeError {
         #[cause]
         cause: TransportError,
     },
-    #[fail(display = "Failed to append to storage on node {}", node_id)]
-    StorageAppend {
+    #[fail(display = "Failed to add node {} to cluster on node {}", other_node, node_id)]
+    NodeAdd {
         node_id: u64,
+        other_node: u64,
         #[cause]
-        cause: EntryWriteError,
+        cause: Box<Fail>,
     },
-    #[fail(display = "Failed to apply snapshot to storage on node {}", node_id)]
-    StorageSnapshot {
+    #[fail(display = "A storage failure occurred on node {}", node_id)]
+    Storage {
         node_id: u64,
         #[cause]
-        cause: SnapshotWriteError,
-    },
-    #[fail(display = "Failed to write state to storage on node {}", node_id)]
-    StorageState {
-        node_id: u64,
-        #[cause]
-        cause: WriteError,
-    },
-    // TODO: add Storage::InitError as cause
-    #[fail(display = "Failed to initialize storage")]
-    StorageInit,
-    #[fail(display = "A serialization or deserialization with bincode failed on node {}", node_id)]
-    Bincode {
-        node_id: u64,
-        #[cause]
-        cause: bincode::Error,
-    },
-    #[fail(display = "A serialization or deserialization with protobuf failed on node {}", node_id)]
-    Protobuf {
-        node_id: u64,
-        #[cause]
-        cause: protobuf::ProtobufError,
+        cause: Box<Fail>,
     },
     // NOTE: this error can be handled in NodeCore by retrying,
     //       so this should not be propagated...
@@ -70,7 +45,7 @@ pub enum NodeError {
     ConfChange {
         node_id: u64,
         #[cause]
-        cause: raft::Error,
+        cause: Box<Fail>,
     },
 }
 

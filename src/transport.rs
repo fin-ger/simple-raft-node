@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use failure::Fail;
 
 use crate::serde_polyfill::MessagePolyfill;
-use crate::{Proposal, Answer, AnswerKind, RequestManager, MachineCore};
+use crate::{Proposal, Answer, AnswerKind, MachineCore};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum TransportItem<M: MachineCore> {
@@ -29,18 +29,27 @@ pub enum TransportError {
     Empty,
 }
 
+#[derive(Debug, Fail)]
+#[fail(display = "Failed to establish a connection")]
+pub struct ConnectError {
+    #[cause]
+    pub cause: Box<Fail>,
+}
+
 pub trait ConnectionManager<M: MachineCore>: Send {
     type Transport: Transport<M>;
 
-    fn init(&mut self, request_manager: RequestManager<M>);
-    fn connect(&self, address: <Self::Transport as Transport<M>>::Address) -> Self::Transport;
     fn accept(&self) -> Option<Self::Transport>;
+    fn connect(
+        &self,
+        address: <Self::Transport as Transport<M>>::Address,
+    ) -> Result<Self::Transport, ConnectError>;
 }
 
 /**
  * This trait describes a single transport (e.g. TCP socket) to one node in the cluster.
  */
-pub trait Transport<M: MachineCore>: Send + PartialEq {
+pub trait Transport<M: MachineCore>: Send {
     type Address: Sized + Serialize + DeserializeOwned + PartialEq;
 
     fn send(&mut self, item: TransportItem<M>) -> Result<(), TransportError>;

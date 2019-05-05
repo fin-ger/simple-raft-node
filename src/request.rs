@@ -51,10 +51,10 @@ pub enum StateRetrievalResult<M: MachineCore> {
     NotFound,
 }
 
-trait RequestHandler<M: MachineCore, V: Sized + Unpin + 'static>
+pub trait RequestHandler<M: MachineCore, V: Sized + Unpin + 'static>
     = Fn(Response<M>) -> RequestResult<V> + Unpin;
 
-struct RequestFuture<M: MachineCore, V: Sized + Unpin + 'static, F: RequestHandler<M, V>> {
+pub struct RequestFuture<M: MachineCore, V: Sized + Unpin + 'static, F: RequestHandler<M, V>> {
     kind: RequestKind<M>,
     response_handler: F,
     request_sent: bool,

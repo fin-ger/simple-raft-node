@@ -1,6 +1,6 @@
 #![feature(async_await, await_macro)]
 
-use simple_raft_node::transports::MpscChannelTransport;
+use simple_raft_node::transports::MpscChannelConnectionManager;
 use simple_raft_node::machines::HashMapMachine;
 use simple_raft_node::storages::MemStorage;
 use simple_raft_node::{Node};
@@ -11,24 +11,23 @@ async fn main() {
 
     log::info!("Spawning nodes");
 
-    let nodes: Vec<Node<HashMapMachine<i64, String>>> = MpscChannelTransport::create_transports(
-        vec![1, 2, 3, 4, 5]
-    )
-        .drain()
-        .map(|(node_id, transports)| {
+    let mut mgrs = MpscChannelConnectionManager::new_managers(vec![1, 2, 3, 4, 5]);
+    let nodes: Vec<Node<HashMapMachine<i64, String>>> = mgrs.drain(..)
+        .map(|mgr| {
             // yeah, not quite simple yet - such a type argument mess
-            Node::new::<_, _, MemStorage>(
-                format!("node_{}", node_id),
+            Node::new::<_, MemStorage>(
+                mgr.node_id(),
                 Default::default(),
                 Default::default(),
-                transports,
+                mgr,
             )
         })
         .collect();
 
-    // Put 10000 key-value pairs.
+    let count = 5;
+
     let mut handles = Vec::new();
-    for i in 0..10000 {
+    for i in 0..count {
         let machine = nodes[0].machine().clone();
         handles.push(runtime::spawn(async move {
             let content = format!("hello, world {}", i);
@@ -46,15 +45,15 @@ async fn main() {
     log::info!("State changes were successful");
 
     for node in nodes.iter() {
-        let name = node.name().clone();
-        let handles: Vec<_> = (0..10000)
+        let id = node.id();
+        let handles: Vec<_> = (0..count)
             .map(|i| {
                 let machine = node.machine().clone();
                 runtime::spawn(async move {
                     (i, await!(machine.get(i)).unwrap())
                 })
             }).collect();
-        log::info!("{} {{", name);
+        log::info!("node {} {{", id);
         for handle in handles {
             let (key, value) = await!(handle);
             log::info!("  {}: {}", key, value);

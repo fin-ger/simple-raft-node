@@ -10,7 +10,14 @@
 // distributed under the License is distributed on an "AS IS" BASIS,
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![feature(vec_remove_item, trait_alias, fn_traits, async_await, await_macro)]
+#![feature(
+    vec_remove_item,
+    drain_filter,
+    trait_alias,
+    fn_traits,
+    async_await,
+    await_macro,
+)]
 
 mod request;
 mod proposal;
@@ -45,7 +52,6 @@ pub struct Node<M: Machine> {
     machine: M,
     handle: Option<JoinHandle<()>>,
     is_running: Arc<Mutex<bool>>,
-    request_manager: RequestManager<M::Core>,
 }
 
 impl<M: Machine> Node<M> {
@@ -96,12 +102,15 @@ impl<M: Machine> Node<M> {
             machine,
             handle: Some(handle),
             is_running: is_running_copy,
-            request_manager: RequestManager::new(request_tx),
         }
     }
 
     pub fn machine(&self) -> &M {
         &self.machine
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
     }
 }
 

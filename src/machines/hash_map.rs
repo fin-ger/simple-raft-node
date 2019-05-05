@@ -1,12 +1,13 @@
-/*use std::collections::HashMap;
+use std::collections::HashMap;
 
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::{
+    machine,
     Machine,
     MachineCore,
-    MachineResult,
-    MachineError,
+    RequestResult,
+    RequestError,
     MachineCoreError,
     RequestManager,
 };
@@ -50,28 +51,28 @@ pub enum HashMapStateChange<K, V> {
 impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOwned>
     HashMapMachine<K, V>
 {
-    pub async fn put(&self, key: K, value: V) -> MachineResult<()> {
+    pub async fn put(&self, key: K, value: V) -> RequestResult<()> {
         if let Some(ref mngr) = self.mngr {
-            return await!(mngr.apply(HashMapStateChange::Put(key, value)));
+            return await!(machine::apply(mngr, HashMapStateChange::Put(key, value)));
         }
 
-        Err(MachineError::ChannelsUnavailable)
+        Err(RequestError::ChannelsUnavailable)
     }
 
-    pub async fn delete(&self, key: K) -> MachineResult<()> {
+    pub async fn delete(&self, key: K) -> RequestResult<()> {
         if let Some(ref mngr) = self.mngr {
-            return await!(mngr.apply(HashMapStateChange::Delete(key)));
+            return await!(machine::apply(mngr, HashMapStateChange::Delete(key)));
         }
 
-        Err(MachineError::ChannelsUnavailable)
+        Err(RequestError::ChannelsUnavailable)
     }
 
-    pub async fn get(&self, key: K) -> MachineResult<V> {
+    pub async fn get(&self, key: K) -> RequestResult<V> {
         if let Some(ref mngr) = self.mngr {
-            return await!(mngr.retrieve(key));
+            return await!(machine::retrieve(mngr, key));
         }
 
-        Err(MachineError::ChannelsUnavailable)
+        Err(RequestError::ChannelsUnavailable)
     }
 }
 
@@ -116,9 +117,8 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
         }
     }
 
-    fn retrieve(&self, state_identifier: &K) -> Result<&V, MachineError> {
+    fn retrieve(&self, state_identifier: &K) -> Result<&V, RequestError> {
         self.hash_map.get(state_identifier)
-            .ok_or(MachineError::StateRetrieval)
+            .ok_or(RequestError::StateRetrieval)
     }
 }
-*/

@@ -75,7 +75,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         };
 
         storage.init_with_conf_state(id, (vec![id], vec![]))
-            .map_err(|_| NodeError::StorageInit)?;
+            .map_err(|e| NodeError::Storage {
+                node_id: id,
+                cause: Box::new(e),
+            })?;
         let wrapped_storage = WrappedStorage::new(storage);
 
         let raft_group = Some(
@@ -218,6 +221,8 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         let mut messages = Vec::new();
         let mut answers = Vec::new();
 
+        let node_id = self.id;
+
         'connection_manager: loop {
             if let Some(transport) = self.connection_manager.accept() {
                 self.new_transports.push(transport);
@@ -228,33 +233,50 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             }
         }
 
-        'new_transports: for transport in self.new_transports.iter_mut() {
-            match transport.try_recv() {
-                Ok(TransportItem::Hello(node_id)) => {
-                    let context = bincode::serialize(&transport.dest_addr())
-                        .map_err(|e| NodeError::Bincode { node_id: self.id, cause: e })?;
-                    let mut conf_change = ConfChange::new();
-                    conf_change.set_node_id(node_id);
-                    conf_change.set_change_type(ConfChangeType::AddNode);
-                    conf_change.set_context(context);
-                    let id = self.proposal_id;
-                    self.proposal_id += 1;
-                    self.proposals.push(Proposal::conf_change(id, self.id, conf_change));
-                },
-                Ok(other) => {
-                    log::warn!("new transport sent invalid message: {:?}", other);
-                    log::warn!("disconnecting from misbehaving transport...");
-                    self.new_transports.remove_item(transport);
-                    break;
-                },
-                Err(TransportError::Empty) => {},
-                Err(TransportError::Disconnected) => {
-                    self.new_transports.remove_item(transport);
+        {
+            let mut i = 0;
+            'new_transports: while i < self.new_transports.len() {
+                let transport = self.new_transports.get_mut(i).unwrap();
+                match transport.try_recv() {
+                    Ok(TransportItem::Hello(new_node_id)) => {
+                        log::debug!("Received hello on node {} from node {}", node_id, new_node_id);
+                        let context = bincode::serialize(&transport.dest_addr())
+                            .map_err(|e| NodeError::NodeAdd {
+                                node_id,
+                                other_node: new_node_id,
+                                cause: Box::new(e),
+                            })?;
+                        let mut conf_change = ConfChange::new();
+                        conf_change.set_node_id(new_node_id);
+                        conf_change.set_change_type(ConfChangeType::AddNode);
+                        conf_change.set_context(context);
+                        let id = self.proposal_id;
+                        self.proposal_id += 1;
+                        self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
+                    },
+                    Ok(other) => {
+                        log::warn!("new transport sent invalid message: {:?}", other);
+                        log::warn!("disconnecting from misbehaving transport...");
+                        self.new_transports.remove(i);
+                        continue;
+                    },
+                    Err(TransportError::Empty) => {},
+                    Err(TransportError::Disconnected) => {
+                        self.new_transports.remove(i);
+                        continue;
+                    }
+                }
+
+                i += 1;
+
+                if timeout.elapsed() >= Duration::from_millis(5) {
+                    break 'new_transports;
                 }
             }
         }
 
-        'transports: for (node_id, transport) in self.transports.iter_mut() {
+        let mut to_disconnect = Vec::new();
+        'transports: for (tp_id, transport) in self.transports.iter_mut() {
             loop {
                 // step raft messages and save forwarded proposals
                 match transport.try_recv() {
@@ -264,9 +286,9 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     Ok(TransportItem::Hello(_)) => {
                         log::error!(
                             "hello received from node {} when already part of raft!",
-                            node_id,
+                            tp_id,
                         );
-                        self.transports.remove(&node_id);
+                        to_disconnect.push(*tp_id);
                     }
                     Err(TransportError::Empty) => break,
                     Err(TransportError::Disconnected) => {
@@ -279,6 +301,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     break 'transports;
                 }
             }
+        }
+
+        for id in to_disconnect.drain(..) {
+            self.transports.remove(&id);
         }
 
         for answer in answers.drain(..) {
@@ -324,7 +350,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     None => {
                         // if applying was successful:
                         // add to proposed vector when proposal originated by us
-                        if self.id == origin {
+                        if node_id == origin {
                             self.proposed.push(id);
                         }
                         continue;
@@ -332,24 +358,23 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     Some(answer) => answer,
                 };
                 // the client who initiated the proposal is connected to us
-                if self.id == origin {
+                if node_id == origin {
                     // if applying was not successful, prepare to tell the client
                     my_answers.push(answer);
                 } else {
-                    self.transports
-                        .get_mut(&origin)
-                        .ok_or(NodeError::NoTransportForNode {
-                            other_node: origin,
-                            this_node: self.id,
-                        })
-                        .and_then(|transport| {
-                            transport.send(TransportItem::Answer(answer))
-                                .map_err(|e| NodeError::AnswerForwarding {
-                                    origin_node: origin,
-                                    this_node: self.id,
-                                    cause: e,
-                                })
-                        })?;
+                    if let Some(transport) = self.transports.get_mut(&origin) {
+                        transport.send(TransportItem::Answer(answer))
+                            .map_err(|e| NodeError::AnswerForwarding {
+                                origin_node: origin,
+                                this_node: node_id,
+                                cause: e,
+                            })?;
+                    } else {
+                        log::warn!(
+                            "Could not forward answer to node {} as transport is unavailable",
+                            origin,
+                        );
+                    }
                 }
             }
 
@@ -365,7 +390,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         let id = proposal.id();
                         leader.send(TransportItem::Proposal(proposal))
                             .map_err(|e| NodeError::ProposalForwarding {
-                                node_id: self.id,
+                                node_id: node_id,
                                 cause: e,
                             })?;
                         // proposal was forwarded and can therefore be put in our proposed
@@ -393,12 +418,12 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
     }
 
     fn on_ready(&mut self) -> NodeResult<()> {
-        // TODO: implement full processing-the-ready-state chapter from raft documentation
-
         // if raft is not initialized, return
         if !self.raft_group.as_ref().unwrap().has_ready() {
             return Ok(());
         }
+
+        let node_id = self.id;
 
         // get the `Ready` with `RawNode::ready` interface.
         let mut ready = self.raft_group.as_mut().unwrap().ready();
@@ -410,9 +435,9 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             // raft logs to the latest position.
             store.writable()
                 .append(ready.entries())
-                .map_err(|e| NodeError::StorageAppend {
-                    node_id: self.id,
-                    cause: e,
+                .map_err(|e| NodeError::Storage {
+                    node_id: node_id,
+                    cause: Box::new(e),
                 })?;
 
             // apply the snapshot. It's necessary because in `RawNode::advance` we stabilize the snapshot.
@@ -420,9 +445,9 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 let s = ready.snapshot().clone();
                 store.writable()
                     .set_snapshot(s)
-                    .map_err(|e| NodeError::StorageSnapshot {
-                        node_id: self.id,
-                        cause: e,
+                    .map_err(|e| NodeError::Storage {
+                        node_id: node_id,
+                        cause: Box::new(e),
                     })?;
             }
         }
@@ -447,14 +472,20 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         // apply configuration changes
                         let mut cc = ConfChange::new();
                         cc.merge_from_bytes(entry.get_data())
-                            .map_err(|e| NodeError::Protobuf { node_id: self.id, cause: e })?;
+                            .map_err(|e| NodeError::ConfChange {
+                                node_id,
+                                cause: Box::new(e),
+                            })?;
 
                         let node_id = cc.get_node_id();
                         match cc.get_change_type() {
                             ConfChangeType::AddNode => {
                                 let address: <C::Transport as Transport<M>>::Address =
                                     bincode::deserialize(cc.get_context())
-                                    .map_err(|e| NodeError::Bincode { node_id: self.id, cause: e })?;
+                                    .map_err(|e| NodeError::ConfChange {
+                                        node_id,
+                                        cause: Box::new(e),
+                                    })?;
 
                                 let pos = self.new_transports
                                     .iter()
@@ -463,6 +494,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                     self.new_transports.remove(pos)
                                 } else {
                                     self.connection_manager.connect(address)
+                                        .map_err(|e| NodeError::ConfChange {
+                                            node_id,
+                                            cause: Box::new(e),
+                                        })?
                                 };
 
                                 self.transports.insert(node_id, transport);
@@ -480,7 +515,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 | ConfChangeType::FinalizeMembershipChange => {
                                     unimplemented!()
                                 },
-                        }.map_err(|e| NodeError::ConfChange { node_id: self.id, cause: e })?;
+                        }.map_err(|e| NodeError::ConfChange {
+                            node_id,
+                            cause: Box::new(e),
+                        })?;
 
                         let cs = ConfState::from(
                             self.raft_group
@@ -493,17 +531,17 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         self.raft_group.as_mut().unwrap().raft.raft_log.store
                             .writable()
                             .set_conf_state(cs)
-                            .map_err(|e| NodeError::StorageState {
-                                node_id: self.id,
-                                cause: e,
+                            .map_err(|e| NodeError::Storage {
+                                node_id,
+                                cause: Box::new(e),
                             })?;
                     },
                     EntryType::EntryNormal => {
                         // for state change proposals, tell the machine to change its state.
                         let state_change = bincode::deserialize(entry.get_data())
-                            .map_err(|e| NodeError::Bincode {
-                                node_id: self.id,
-                                cause: e,
+                            .map_err(|e| NodeError::ConfChange {
+                                node_id,
+                                cause: Box::new(e),
                             })?;
                         self.machine.apply(state_change);
                     },
@@ -517,7 +555,9 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
                 // if the context contains our node_id and one of our proposed proposals
                 // answer the client
-                if node_id == self.raft_group.as_ref().unwrap().raft.id && self.proposed.contains(&proposal_id) {
+                if node_id == self.raft_group.as_ref().unwrap().raft.id
+                    && self.proposed.contains(&proposal_id)
+                {
                     self.send_response(Answer {
                         id: proposal_id,
                         kind: AnswerKind::Success,
@@ -539,7 +579,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     commit: last_committed.get_index(),
                     term: last_committed.get_term(),
                     ..store.hard_state().clone()
-                }).map_err(|e| NodeError::StorageState { node_id: self.id, cause: e })?;
+                }).map_err(|e| NodeError::Storage {
+                    node_id,
+                    cause: Box::new(e),
+                })?;
             }
         }
 

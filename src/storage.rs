@@ -50,7 +50,7 @@ pub enum SnapshotWriteError {
 pub struct WriteError;
 
 pub trait Storage: Default + Send + Sized {
-    type InitError;
+    type InitError: Fail;
 
     fn init(&mut self, node_id: u64) -> Result<(), Self::InitError>;
     fn hard_state<'a>(&'a self) -> &'a HardState;
