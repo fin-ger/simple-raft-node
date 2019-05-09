@@ -1,5 +1,6 @@
 use std::convert::{TryInto, TryFrom};
 
+use failure::Fail;
 use serde::{Deserialize, Serialize};
 use raft::{eraftpb::ConfChange, RawNode};
 
@@ -18,7 +19,7 @@ pub struct Answer {
     pub kind: AnswerKind,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
     pub proposal_id: u64,
     pub node_id: u64,
@@ -55,6 +56,12 @@ pub struct Proposal<M: MachineCore> {
     #[serde(bound(deserialize = "ProposalKind<M>: Deserialize<'de>"))]
     #[serde(bound(serialize = "ProposalKind<M>: Serialize"))]
     kind: ProposalKind<M>,
+}
+
+#[derive(Debug, Fail)]
+pub enum ProposeError {
+    #[fail(display = "A conf-change is already pending in this raft")]
+    AlreadyPending,
 }
 
 impl<M: MachineCore> Proposal<M> {
@@ -97,18 +104,19 @@ impl<M: MachineCore> Proposal<M> {
     }
 
     pub fn apply_on<T: raft::Storage>(
-        self,
+        &self,
         raft_group: &mut RawNode<T>,
-    ) -> Option<Answer> {
+    ) -> Result<Option<Answer>, ProposeError> {
         let id = self.id();
-        let context = match self.context.try_into() {
+        let origin = self.origin();
+        let context = match self.context.clone().try_into() {
             Ok(context) => context,
             Err(err) => {
                 log::error!("Failed to deserialize context of proposal: {}", err);
-                return Some(Answer {
+                return Ok(Some(Answer {
                     id,
                     kind: AnswerKind::Fail,
-                });
+                }));
             },
         };
 
@@ -119,33 +127,48 @@ impl<M: MachineCore> Proposal<M> {
                     Ok(data) => data,
                     Err(err) => {
                         log::error!("Failed to serialize state-change of proposal: {}", err);
-                        return Some(Answer {
+                        return Ok(Some(Answer {
                             id,
                             kind: AnswerKind::Fail,
-                        });
+                        }));
                     },
                 };
+
+                log::debug!(
+                    "leader node {} is proposing state-change originating on node {}",
+                    raft_group.raft.id,
+                    origin,
+                );
 
                 match raft_group.propose(context, data) {
                     Ok(()) => {},
                     Err(err) => {
                         log::error!("Failed to process state-change in raft: {}", err);
-                        return Some(Answer {
+                        return Ok(Some(Answer {
                             id,
                             kind: AnswerKind::Fail,
-                        });
+                        }));
                     },
                 };
             },
             ProposalKind::ConfChange(ref conf_change) => {
+                if raft_group.raft.has_pending_conf() {
+                    return Err(ProposeError::AlreadyPending);
+                }
+
+                log::debug!(
+                    "leader node {} is proposing conf-change originating on node {}",
+                    raft_group.raft.id,
+                    origin,
+                );
                 match raft_group.propose_conf_change(context, conf_change.clone()) {
                     Ok(()) => {},
                     Err(err) => {
                         log::error!("Failed to process conf-change in raft: {}", err);
-                        return Some(Answer {
+                        return Ok(Some(Answer {
                             id,
                             kind: AnswerKind::Fail,
-                        });
+                        }));
                     },
                 };
             },
@@ -157,12 +180,12 @@ impl<M: MachineCore> Proposal<M> {
 
         if raft_group.raft.raft_log.last_index() == last_index1 {
             log::error!("No progress was made while processing proposal!");
-            return Some(Answer {
+            return Ok(Some(Answer {
                 id,
                 kind: AnswerKind::Fail,
-            });
+            }));
         }
 
-        None
+        Ok(None)
     }
 }

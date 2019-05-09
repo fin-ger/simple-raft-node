@@ -9,7 +9,9 @@ use crate::{MachineCore};
 
 #[derive(Debug, Fail)]
 pub enum RequestError {
-    #[fail(display = "The proposal channels are not available")]
+    #[fail(display = "The machine has not yet been initialized")]
+    NotInitialized(Backtrace),
+    #[fail(display = "A communication channel to the node core is not available")]
     ChannelsUnavailable(Backtrace),
     #[fail(display = "The proposed state change failed")]
     StateChange(Backtrace),

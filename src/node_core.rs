@@ -29,6 +29,7 @@ use crate::{
     NodeResult,
     NodeError,
     Proposal,
+    ProposeError,
     Answer,
     AnswerKind,
     Context,
@@ -62,42 +63,60 @@ pub struct NodeCore<M: MachineCore, C: ConnectionManager<M>, S: Storage> {
 impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
     // Create a raft leader only with itself in its configuration.
     pub fn new(
-        id: u64,
         base_config: Config,
+        gateway: Option<<C::Transport as Transport<M>>::Address>,
         machine: M,
         mut storage: S,
-        connection_manager: C,
+        mut connection_manager: C,
         request_rx: Receiver<Request<M>>,
     ) -> NodeResult<Self> {
-        let cfg = Config {
-            id,
-            tag: format!("node_{}", id),
-            ..base_config.clone()
+        log::debug!("creating core for node {}...", base_config.id);
+
+        let mut new_transports = Vec::new();
+        let conf_state = if let Some(gateway) = gateway {
+            let mut new_transport = connection_manager.connect(&gateway)
+                .map_err(|e| NodeError::GatewayConnect {
+                    node_id: base_config.id,
+                    address: Box::new(gateway.clone()),
+                    cause: Box::new(e),
+                    backtrace: Backtrace::new(),
+                })?;
+            new_transport.send(TransportItem::Hello(base_config.id))
+                .map_err(|e| NodeError::GatewayConnect {
+                    node_id: base_config.id,
+                    address: Box::new(gateway.clone()),
+                    cause: Box::new(e),
+                    backtrace: Backtrace::new(),
+                })?;
+            new_transports.push(new_transport);
+            (vec![], vec![])
+        } else {
+            (vec![base_config.id], vec![])
         };
 
-        storage.init_with_conf_state(id, (vec![id], vec![]))
+        storage.init_with_conf_state(base_config.id, conf_state)
             .map_err(|e| NodeError::Storage {
-                node_id: id,
+                node_id: base_config.id,
                 cause: Box::new(e),
                 backtrace: Backtrace::new(),
             })?;
         let wrapped_storage = WrappedStorage::new(storage);
 
         let raft_group = Some(
-            RawNode::new(&cfg, wrapped_storage)
+            RawNode::new(&base_config, wrapped_storage)
                 .map_err(|e| NodeError::Raft {
-                    node_id: id,
+                    node_id: base_config.id,
                     cause: e,
                     backtrace: Backtrace::new(),
                 })?
         );
 
         Ok(Self {
-            id,
+            id: base_config.id,
             base_config,
             raft_group,
             connection_manager,
-            new_transports: Vec::new(),
+            new_transports,
             transports: HashMap::new(),
             proposed: Default::default(),
             proposals: Default::default(),
@@ -108,6 +127,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             response_wakers: Default::default(),
             machine,
         })
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     // Initialize raft for followers.
@@ -204,6 +227,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
             match request.kind {
                 RequestKind::StateChange(state_change) => {
+                    log::trace!("received new state-change request, adding to proposals...");
                     let id = self.proposal_id;
                     self.proposal_id += 1;
                     self.response_txs.insert(id, request.response_tx);
@@ -236,6 +260,14 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
     }
 
     pub fn advance(&mut self) -> NodeResult<()> {
+        if let Some(raft_group) = self.raft_group.as_mut() {
+            let leader = raft_group.raft.leader_id;
+            let nodes = &raft_group.mut_store().writable().conf_state().nodes;
+            log::debug!("raft-state on node {}: {{ leader: {}, nodes: {:?} }}", self.id, leader, nodes);
+        }
+
+        log::trace!("advancing node {}...", self.id);
+
         let timeout = Instant::now();
 
         let mut messages = Vec::new();
@@ -244,8 +276,24 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         let node_id = self.id;
 
         'connection_manager: loop {
-            if let Some(transport) = self.connection_manager.accept() {
-                self.new_transports.push(transport);
+            if let Some(mut transport) = self.connection_manager.accept() {
+                log::debug!("accepted new connection on node {} from {:?}", node_id, transport.dest());
+                let conf_state = self.raft_group.as_ref().unwrap()
+                    .get_store()
+                    .readable()
+                    .snapshot_metadata()
+                    .get_conf_state();
+                if let Ok(()) = transport.send(TransportItem::Welcome(
+                    node_id, conf_state.nodes.clone(), conf_state.learners.clone()
+                )) {
+                    self.new_transports.push(transport);
+                } else {
+                    log::error!(
+                        "failed to send welcome to node {} from node {}",
+                        transport.dest(),
+                        node_id,
+                    );
+                }
             }
 
             if timeout.elapsed() >= Duration::from_millis(2) {
@@ -259,8 +307,8 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 let transport = self.new_transports.get_mut(i).unwrap();
                 match transport.try_recv() {
                     Ok(TransportItem::Hello(new_node_id)) => {
-                        log::debug!("Received hello on node {} from node {}", node_id, new_node_id);
-                        let context = bincode::serialize(&transport.dest_addr())
+                        log::debug!("received hello on node {} from node {}", node_id, new_node_id);
+                        let context = bincode::serialize(&transport.dest())
                             .map_err(|e| NodeError::NodeAdd {
                                 node_id,
                                 other_node: new_node_id,
@@ -274,21 +322,51 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         let id = self.proposal_id;
                         self.proposal_id += 1;
                         self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
+                        let transport = self.new_transports.remove(i);
+                        self.transports.insert(new_node_id, transport);
+                    },
+                    Ok(TransportItem::Welcome(new_node_id, nodes, learners)) => {
+                        log::debug!("received welcome on node {} from node {}", node_id, new_node_id);
+                        let transport = self.new_transports.remove(i);
+                        self.transports.insert(new_node_id, transport);
+                        let raft_group = self.raft_group.as_mut().unwrap();
+                        for node in nodes {
+                            raft_group.raft.add_node(node)
+                                .map_err(|e| NodeError::NodeAdd {
+                                    node_id,
+                                    other_node: new_node_id,
+                                    cause: Box::new(e),
+                                    backtrace: Backtrace::new(),
+                                })?;
+                        }
+
+                        for learner in learners {
+                            raft_group.raft.add_learner(learner)
+                                .map_err(|e| NodeError::NodeAdd {
+                                    node_id,
+                                    other_node: new_node_id,
+                                    cause: Box::new(e),
+                                    backtrace: Backtrace::new(),
+                                })?;
+                        }
                     },
                     Ok(other) => {
                         log::warn!("new transport sent invalid message: {:?}", other);
                         log::warn!("disconnecting from misbehaving transport...");
                         self.new_transports.remove(i);
-                        continue;
                     },
-                    Err(TransportError::Empty(_)) => {},
+                    Err(TransportError::Empty(_)) => {
+                        i += 1;
+                    },
                     Err(TransportError::Disconnected(_)) => {
+                        log::debug!(
+                            "new transport from {:?} disconnected before sending hello or welcome on node {}, forgetting...",
+                            transport.dest(),
+                            node_id,
+                        );
                         self.new_transports.remove(i);
-                        continue;
                     }
                 }
-
-                i += 1;
 
                 if timeout.elapsed() >= Duration::from_millis(5) {
                     break 'new_transports;
@@ -299,21 +377,40 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         let mut to_disconnect = Vec::new();
         'transports: for (tp_id, transport) in self.transports.iter_mut() {
             loop {
-                // step raft messages and save forwarded proposals
+                log::trace!("receiving new items from transport {}...", tp_id);
+                // receive new messages from transport
                 match transport.try_recv() {
-                    Ok(TransportItem::Message(msg)) => messages.push(msg),
-                    Ok(TransportItem::Proposal(p)) => self.proposals.push(p),
-                    Ok(TransportItem::Answer(a)) => answers.push(a),
+                    Ok(TransportItem::Message(msg)) => {
+                        log::trace!("received message {:?} on transport {}", msg, tp_id);
+                        messages.push(msg);
+                    },
+                    Ok(TransportItem::Proposal(p)) => {
+                        log::trace!("received proposal {:?} on transport {}", p, tp_id);
+                        self.proposals.push(p);
+                    },
+                    Ok(TransportItem::Answer(a)) => {
+                        log::trace!("received answer {:?} on transport {}", a, tp_id);
+                        answers.push(a);
+                    },
                     Ok(TransportItem::Hello(_)) => {
                         log::error!(
-                            "hello received from node {} when already part of raft!",
+                            "hello received from node {} on node {} when already part of raft!",
                             tp_id,
+                            node_id,
                         );
                         to_disconnect.push(*tp_id);
-                    }
+                    },
+                    Ok(TransportItem::Welcome(..)) => {
+                        log::error!(
+                            "welcome received from node {} on node {} when already part of raft!",
+                            tp_id,
+                            node_id,
+                        );
+                        to_disconnect.push(*tp_id);
+                    },
                     Err(TransportError::Empty(_)) => break,
                     Err(TransportError::Disconnected(_)) => {
-                        //log::warn!("host for raft {} is down!", transport.dest());
+                        log::trace!("host for node {} is down!", transport.dest());
                         break;
                     },
                 }
@@ -339,6 +436,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         }
 
         if self.raft_group.is_none() {
+            log::trace!("raft is not initialized yet on node {}", self.id);
             return Ok(());
         }
 
@@ -353,6 +451,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
         // handle saved proposals if we are leader
         if self.raft_group.as_ref().unwrap().raft.state == StateRole::Leader {
+            log::trace!("node {} is leader and handling proposals", self.id);
             let mut my_answers = Vec::new();
             // FIXME: only reading first 110 proposals, as otherwise the raft
             //        is unable to always process them. This needs further
@@ -363,12 +462,13 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             if end > magic_number_nobody_will_ever_understand {
                 end = magic_number_nobody_will_ever_understand;
             }
+            let mut retry = Vec::new();
             // drain the proposals (consume all)
             for proposal in self.proposals.drain(..end) {
                 let id = proposal.id();
                 let origin = proposal.origin();
                 let answer = match proposal.apply_on(self.raft_group.as_mut().unwrap()) {
-                    None => {
+                    Ok(None) => {
                         // if applying was successful:
                         // add to proposed vector when proposal originated by us
                         if node_id == origin {
@@ -376,7 +476,11 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         }
                         continue;
                     },
-                    Some(answer) => answer,
+                    Ok(Some(answer)) => answer,
+                    Err(ProposeError::AlreadyPending) => {
+                        retry.push(proposal);
+                        continue;
+                    },
                 };
                 // the client who initiated the proposal is connected to us
                 if node_id == origin {
@@ -384,6 +488,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     my_answers.push(answer);
                 } else {
                     if let Some(transport) = self.transports.get_mut(&origin) {
+                        log::trace!("forwarding answer to node {}", origin);
                         transport.send(TransportItem::Answer(answer))
                             .map_err(|e| NodeError::AnswerForwarding {
                                 origin_node: origin,
@@ -403,13 +508,18 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             for answer in my_answers.drain(..) {
                 self.send_response(answer)?;
             }
+
+            self.proposals.append(&mut retry);
         } else {
+            log::trace!("node {} is follower", self.id);
             // if we know some leader
             match self.transports.get_mut(&self.raft_group.as_ref().unwrap().raft.leader_id) {
                 Some(leader) => {
+                    log::trace!("forwarding proposals to leader node {}", leader.dest());
                     // forward proposals to leader
                     for proposal in self.proposals.drain(..) {
                         let id = proposal.id();
+                        log::trace!("forwarding proposal {}...", id);
                         leader.send(TransportItem::Proposal(proposal))
                             .map_err(|e| NodeError::ProposalForwarding {
                                 node_id: node_id,
@@ -434,6 +544,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         self.on_ready()?;
 
         if let Some(duration) = Duration::from_millis(10).checked_sub(timeout.elapsed()) {
+            log::trace!("node {} is awaiting rest of cycle time", self.id);
             thread::sleep(duration);
         }
 
@@ -454,6 +565,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         {
             let store = &mut self.raft_group.as_mut().unwrap().raft.raft_log.store;
 
+            log::trace!("persisting raft logs...");
             // persistent raft logs. It's necessary because in `RawNode::advance` we stabilize
             // raft logs to the latest position.
             store.writable()
@@ -464,7 +576,9 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     backtrace: Backtrace::new(),
                 })?;
 
-            // apply the snapshot. It's necessary because in `RawNode::advance` we stabilize the snapshot.
+            log::trace!("applying pending snapshot");
+            // apply the snapshot. It's necessary because in `RawNode::advance`
+            // we stabilize the snapshot.
             if *ready.snapshot() != Snapshot::new_() {
                 let s = ready.snapshot().clone();
                 store.writable()
@@ -477,6 +591,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             }
         }
 
+        log::trace!("sending pending messages to other nodes");
         // send out the messages from this node
         for msg in ready.messages.drain(..) {
             let to = msg.get_to();
@@ -489,11 +604,13 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         if let Some(committed_entries) = ready.committed_entries.take() {
             for entry in &committed_entries {
                 if entry.get_data().is_empty() {
+                    log::debug!("received commit from new elected leader on node {}", self.id);
                     // from new elected leaders.
                     continue;
                 }
                 match entry.get_entry_type() {
                     EntryType::EntryConfChange => {
+                        log::debug!("received conf-change on node {}", self.id);
                         // apply configuration changes
                         let mut cc = ConfChange::new();
                         cc.merge_from_bytes(entry.get_data())
@@ -506,37 +623,53 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         let node_id = cc.get_node_id();
                         match cc.get_change_type() {
                             ConfChangeType::AddNode => {
-                                let address: <C::Transport as Transport<M>>::Address =
-                                    bincode::deserialize(cc.get_context())
-                                    .map_err(|e| NodeError::ConfChange {
-                                        node_id,
-                                        cause: Box::new(e),
-                                        backtrace: Backtrace::new(),
-                                    })?;
-
-                                let pos = self.new_transports
-                                    .iter()
-                                    .position(|t| t.dest_addr() == address);
-                                let transport = if let Some(pos) = pos {
-                                    self.new_transports.remove(pos)
-                                } else {
-                                    self.connection_manager.connect(address)
+                                if node_id != self.id {
+                                    log::debug!("conf-change adds node {} to raft", node_id);
+                                    let address: <C::Transport as Transport<M>>::Address =
+                                        bincode::deserialize(cc.get_context())
                                         .map_err(|e| NodeError::ConfChange {
-                                            node_id,
+                                            node_id: self.id,
                                             cause: Box::new(e),
                                             backtrace: Backtrace::new(),
-                                        })?
-                                };
+                                        })?;
 
-                                self.transports.insert(node_id, transport);
+                                    let in_transports = self.transports
+                                        .values()
+                                        .find(|t| t.dest() == address);
+                                    let in_new_transports = self.new_transports
+                                        .iter()
+                                        .find(|t| t.dest() == address);
+                                    if in_transports.is_none() && in_new_transports.is_none() {
+                                        log::debug!(
+                                            "trying to connect to {:?} on node {}...",
+                                            address,
+                                            self.id,
+                                        );
+                                        let mut transport = self.connection_manager.connect(&address)
+                                            .map_err(|e| NodeError::ConfChange {
+                                                node_id: self.id,
+                                                cause: Box::new(e),
+                                                backtrace: Backtrace::new(),
+                                            })?;
 
+                                        transport.send(TransportItem::Welcome(self.id, vec![], vec![]))
+                                            .map_err(|e| NodeError::ConfChange {
+                                                node_id: self.id,
+                                                cause: Box::new(e),
+                                                backtrace: Backtrace::new(),
+                                            })?;
+                                        self.new_transports.push(transport);
+                                    };
+                                }
                                 self.raft_group.as_mut().unwrap().raft.add_node(node_id)
                             },
                             ConfChangeType::RemoveNode => {
+                                log::debug!("conf-change removes node {} from raft", node_id);
                                 self.transports.remove(&node_id);
                                 self.raft_group.as_mut().unwrap().raft.remove_node(node_id)
                             },
                             ConfChangeType::AddLearnerNode => {
+                                log::debug!("conf-change adds learner node {} to raft", node_id);
                                 self.raft_group.as_mut().unwrap().raft.add_learner(node_id)
                             },
                             ConfChangeType::BeginMembershipChange
@@ -557,6 +690,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 .configuration()
                                 .clone()
                         );
+                        log::debug!(
+                            "writing new conf-state from conf-change to storage on node {}...",
+                            self.id,
+                        );
                         self.raft_group.as_mut().unwrap().raft.raft_log.store
                             .writable()
                             .set_conf_state(cs)
@@ -567,6 +704,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             })?;
                     },
                     EntryType::EntryNormal => {
+                        log::debug!("received state-change entry on node {}", self.id);
                         // for state change proposals, tell the machine to change its state.
                         let state_change = bincode::deserialize(entry.get_data())
                             .map_err(|e| NodeError::ConfChange {
@@ -589,6 +727,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 if node_id == self.raft_group.as_ref().unwrap().raft.id
                     && self.proposed.contains(&proposal_id)
                 {
+                    log::debug!("delivering answer of proposal {} on node {}", proposal_id, self.id);
                     // ignore when sending the answer was not successful
                     let _ = self.send_response(Answer {
                         id: proposal_id,
@@ -599,6 +738,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             }
 
             if let Some(last_committed) = committed_entries.last() {
+                log::debug!("writing new hard-state on node {} to storage...", self.id);
                 let store = self.raft_group
                     .as_mut()
                     .unwrap()
@@ -619,6 +759,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             }
         }
 
+        log::trace!("finished processing the ready state, advancing raft...");
         // call `RawNode::advance` interface to update position flags in the raft.
         self.raft_group.as_mut().unwrap().advance(ready);
 

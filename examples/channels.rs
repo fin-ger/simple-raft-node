@@ -3,7 +3,7 @@
 use simple_raft_node::transports::MpscChannelConnectionManager;
 use simple_raft_node::machines::HashMapMachine;
 use simple_raft_node::storages::MemStorage;
-use simple_raft_node::{Node};
+use simple_raft_node::{Node, Config};
 
 #[runtime::main]
 async fn main() {
@@ -14,15 +14,30 @@ async fn main() {
     let mut mgrs = MpscChannelConnectionManager::new_managers(vec![1, 2, 3, 4, 5]);
     let nodes: Vec<Node<HashMapMachine<i64, String>>> = mgrs.drain(..)
         .map(|mgr| {
-            // yeah, not quite simple yet - such a type argument mess
-            Node::new::<_, MemStorage>(
-                mgr.node_id(),
-                Default::default(),
-                Default::default(),
+            let config = Config {
+                id: mgr.node_id(),
+                tag: format!("node_{}", mgr.node_id()),
+                election_tick: 10,
+                heartbeat_tick: 3,
+                ..Default::default()
+            };
+            let gateway = if config.id != 1 {
+                Some(1)
+            } else {
+                None
+            };
+            let machine = HashMapMachine::new();
+            let storage = MemStorage::new();
+            Node::new(
+                config,
+                gateway,
+                machine,
+                storage,
                 mgr,
             )
         })
         .collect();
+    std::thread::sleep(std::time::Duration::from_secs(5));
 
     let count = 5;
 

@@ -13,6 +13,7 @@ pub enum TransportItem<M: MachineCore> {
     Answer(Answer),
     Message(#[serde(with = "MessagePolyfill")] Message),
     Hello(u64),
+    Welcome(u64, Vec<u64>, Vec<u64>),
 }
 
 impl<M: MachineCore> Default for TransportItem<M> {
@@ -36,23 +37,27 @@ pub struct ConnectError(#[cause] pub Box<Fail>, pub Backtrace);
 pub trait ConnectionManager<M: MachineCore>: Send {
     type Transport: Transport<M>;
 
-    fn accept(&self) -> Option<Self::Transport>;
+    fn accept(&mut self) -> Option<Self::Transport>;
     fn connect(
-        &self,
-        address: <Self::Transport as Transport<M>>::Address,
+        &mut self,
+        address: &<Self::Transport as Transport<M>>::Address,
     ) -> Result<Self::Transport, ConnectError>;
 }
+
+pub trait Address =
+    std::fmt::Debug
+    + std::fmt::Display
+    + Send
+    + Sync;
 
 /**
  * This trait describes a single transport (e.g. TCP socket) to one node in the cluster.
  */
 pub trait Transport<M: MachineCore>: Send {
-    type Address: Sized + Serialize + DeserializeOwned + PartialEq;
+    type Address: Address + Serialize + DeserializeOwned + Clone + Sized + PartialEq + 'static;
 
     fn send(&mut self, item: TransportItem<M>) -> Result<(), TransportError>;
     fn try_recv(&mut self) -> Result<TransportItem<M>, TransportError>;
-    fn src_id(&self) -> u64;
-    fn dest_id(&self) -> u64;
-    fn src_addr(&self) -> Self::Address;
-    fn dest_addr(&self) -> Self::Address;
+    fn src(&self) -> Self::Address;
+    fn dest(&self) -> Self::Address;
 }

@@ -39,11 +39,12 @@ pub use transport::*;
 pub use storage::*;
 pub use request::*;
 
+pub use raft::Config;
+
 use std::thread::{self, JoinHandle};
 use std::sync::{Arc, Mutex};
 
 use failure::Fail;
-use raft::Config;
 use crossbeam::channel;
 
 use node_core::NodeCore;
@@ -57,22 +58,20 @@ pub struct Node<M: Machine> {
 
 impl<M: Machine> Node<M> {
     pub fn new<C: ConnectionManager<M::Core> + 'static, S: Storage + 'static>(
-        id: u64,
+        config: Config,
+        gateway: Option<<C::Transport as Transport<M::Core>>::Address>,
         mut machine: M,
         storage: S,
         connection_manager: C,
     ) -> Self {
+        log::debug!("creating new node for id {}...", config.id);
         let (request_tx, request_rx) = channel::unbounded();
-        let config = Config {
-            election_tick: 10,
-            heartbeat_tick: 3,
-            ..Default::default()
-        };
         machine.init(RequestManager::new(request_tx.clone()));
 
+        let id = config.id;
         let mut node = NodeCore::new(
-            id,
             config,
+            gateway,
             machine.core(),
             storage,
             connection_manager,
@@ -82,16 +81,25 @@ impl<M: Machine> Node<M> {
         let is_running = Arc::new(Mutex::new(true));
         let is_running_copy = is_running.clone();
 
+        log::trace!("spawing worker thread for node {}...", id);
         let handle = thread::spawn(move || {
             loop {
+                log::trace!("beginning new cycle on node {}", node.id());
+
                 if !*is_running.lock().unwrap() {
+                    log::debug!("stopping worker thread of node {}", node.id());
                     break;
                 }
 
                 match node.advance() {
                     Ok(()) => {},
                     Err(err) => {
-                        log::error!("advance of node {} failed: {}", id, err.backtrace().unwrap());
+                        log::error!(
+                            "advance of node {} failed: {:?}\n{}",
+                            node.id(),
+                            err,
+                            err.backtrace().unwrap(),
+                        );
                         break;
                     },
                 };

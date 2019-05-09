@@ -121,6 +121,10 @@ impl<T: Storage> WrappedStorage<T> {
     pub fn writable(&mut self) -> &mut T {
         &mut self.storage
     }
+
+    pub fn readable(&self) -> &T {
+        &self.storage
+    }
 }
 
 impl<T: Storage> raft::Storage for WrappedStorage<T> {

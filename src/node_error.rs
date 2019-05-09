@@ -1,5 +1,5 @@
 use failure::{Fail, Backtrace};
-use crate::TransportError;
+use crate::{Address, TransportError};
 
 #[derive(Debug, Fail)]
 pub enum NodeError {
@@ -50,6 +50,14 @@ pub enum NodeError {
     #[fail(display = "Failed to apply config change on node {}", node_id)]
     ConfChange {
         node_id: u64,
+        #[cause]
+        cause: Box<Fail>,
+        backtrace: Backtrace,
+    },
+    #[fail(display = "Failed to connect to gateway server at address {:?} on node {}", address, node_id)]
+    GatewayConnect {
+        node_id: u64,
+        address: Box<Address>,
         #[cause]
         cause: Box<Fail>,
         backtrace: Backtrace,

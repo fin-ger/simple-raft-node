@@ -36,12 +36,19 @@ pub struct MemStorage {
     entries: Vec<Entry>,
 }
 
+impl MemStorage {
+    pub fn new() -> Self {
+        Default::default()
+    }
+}
+
 impl Storage for MemStorage {
     type InitError = MemStorageError;
 
     fn init(&mut self, _node_id: u64) -> Result<(), Self::InitError> {
         // we ignore the node_name here as we don't need an identifier for the node to load
         // old state e.g. from disk
+        log::debug!("initializing memory storage");
         Ok(())
     }
 
@@ -73,8 +80,10 @@ impl Storage for MemStorage {
 
     fn set_snapshot(&mut self, snapshot: Snapshot) -> Result<(), SnapshotWriteError> {
         let metadata = snapshot.get_metadata();
+        log::debug!("applying snapshot on memory storage...");
 
         if self.first_index() > metadata.get_index() {
+            log::error!("snapshot is out-of-date and cannot be applied");
             return Err(SnapshotWriteError::OutOfDate(Backtrace::new()));
         }
 
@@ -85,6 +94,8 @@ impl Storage for MemStorage {
         self.snapshot = snapshot;
         self.entries.clear();
 
+        log::debug!("snapshot applied");
+
         Ok(())
     }
 
@@ -93,7 +104,10 @@ impl Storage for MemStorage {
             return Ok(());
         }
 
+        log::trace!("appending {} new entries to memory storage...", entries.len());
+
         if self.first_index() > entries[0].get_index() {
+            log::error!("cannot apply new entries as the indices are already compacted");
             return Err(EntryWriteError::AlreadyCompacted {
                 compacted_index: self.first_index() - 1,
                 entry_index: entries[0].get_index(),
@@ -102,6 +116,7 @@ impl Storage for MemStorage {
         }
 
         if self.last_index() + 1 < entries[0].get_index() {
+            log::error!("cannot apply new entries as the first index is not continuous");
             return Err(EntryWriteError::NotContinuous {
                 last_entry: self.last_index(),
                 entry_index: entries[0].get_index(),
@@ -113,6 +128,8 @@ impl Storage for MemStorage {
         self.entries.drain(diff as usize..);
         self.entries.extend_from_slice(&entries);
 
+        log::trace!("appended {} entries to the memory storage", entries.len());
+
         Ok(())
     }
 
@@ -122,9 +139,19 @@ impl Storage for MemStorage {
         high: u64,
         max_size: impl Into<Option<u64>>,
     ) -> Result<Vec<Entry>, EntryReadError> {
+        let max_size = max_size.into();
+
+        log::trace!(
+            "reading entries {} to {} with {:?} boundary from memory storage...",
+            low,
+            high,
+            max_size,
+        );
+
         if let Some(offset) = self.try_first_index() {
             if low >= offset {
                 if high > self.last_index() + 1 {
+                    log::error!("the given entry indices ({}, {}) are out of bounds", low, high);
                     return Err(EntryReadError::OutOfBounds(Backtrace::new()));
                 }
 
@@ -136,6 +163,8 @@ impl Storage for MemStorage {
                 return Ok(entries);
             }
         }
+
+        log::error!("part of the given entry indices ({}, {}) are already compacted", low, high);
 
         Err(EntryReadError::Compacted(Backtrace::new()))
     }
