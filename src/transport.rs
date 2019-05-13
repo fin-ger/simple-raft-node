@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use failure::{Fail, Backtrace};
 
 use crate::serde_polyfill::MessagePolyfill;
-use crate::{Proposal, Answer, AnswerKind, MachineCore};
+use crate::{Proposal, Answer, MachineCore};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum TransportItem<M: MachineCore> {
@@ -14,12 +14,6 @@ pub enum TransportItem<M: MachineCore> {
     Message(#[serde(with = "MessagePolyfill")] Message),
     Hello(u64),
     Welcome(u64, Vec<u64>, Vec<u64>),
-}
-
-impl<M: MachineCore> Default for TransportItem<M> {
-    fn default() -> Self {
-        TransportItem::Answer(Answer { id: 0, kind: AnswerKind::Success })
-    }
 }
 
 #[derive(Debug, Fail)]

@@ -1,61 +1,55 @@
 #![feature(async_await, await_macro)]
 
-use simple_raft_node::transports::TcpTransport;
+use simple_raft_node::transports::TcpConnectionManager;
 use simple_raft_node::machines::HashMapMachine;
 use simple_raft_node::storages::MemStorage;
-use simple_raft_node::Node;
+use simple_raft_node::{Node, Config};
 
-use std::net::{TcpListener, TcpStream, SocketAddr};
+use std::net::SocketAddr;
 
 #[runtime::main]
 async fn main() {
     env_logger::init();
 
-    let node_id = std::env::var("SRN_NODE_ID")
-        .expect("SRN_NODE_ID environment variable is not set");
-    let address = std::env::var("SRN_ADDRESS")
-        .expect("SRN_ADDRESS environment variable not set")
-        .parse::<SocketAddr>()
-        .expect("SRN_ADDRESS cannot be parsed as valid address");
+    log::info!("Spawning nodes");
 
-    log::info!("Spawning node {}", node_id);
-    let node = Node::new(
-        format!("node_{}", node_id),
-        Default::default(),
-        Default::default(),
-        Vec::new(),
-    );
-    let gateway = std::env::var("SRN_GATEWAY")
-        .ok()
-        .map(|s| s.parse::<SocketAddr>());
+    let nodes: Vec<Node<HashMapMachine<i64, String>>> = (1..6)
+        .map(|node_id| {
+            let gateway = if node_id != 1 {
+                Some("127.0.0.1:8081".parse::<SocketAddr>().unwrap())
+            } else {
+                None
+            };
+            let address = format!("127.0.0.1:{}", 8080 + node_id)
+                .parse::<SocketAddr>()
+                .unwrap();
+            let config = Config {
+                id: node_id,
+                tag: format!("node_{}", node_id),
+                election_tick: 10,
+                heartbeat_tick: 3,
+                ..Default::default()
+            };
+            let machine = HashMapMachine::new();
+            let storage = MemStorage::new();
+            let mgr = TcpConnectionManager::new(address).unwrap();
+            Node::new(
+                config,
+                gateway,
+                machine,
+                storage,
+                mgr,
+            )
+        })
+        .collect();
 
-    if let Some(gateway) = gateway {
-        let stream = TcpStream::connect(gateway)
-            .expect("Cannot connect to SRN-gateway");
-        node.add_node(stream);
-    }
+    std::thread::sleep(std::time::Duration::from_secs(5));
 
-    let listener = TcpListener::bind(address)
-        .expect("Could not create TcpListener");
+    let count = 5;
 
-    for conn in listener.incoming() {
-        let stream = match conn {
-            Ok(stream) => stream,
-            Err(e) => {
-                log::error!("connection failed: {}", e);
-                continue;
-            },
-        };
-
-        // TODO report other gateways
-        // TODO when node got added connect to other nodes reported by gateway
-        node.add_node(stream);
-    }
-
-    // Put 10000 key-value pairs.
     let mut handles = Vec::new();
-    for i in 0..10000 {
-        let machine = node.machine().clone();
+    for i in 0..count {
+        let machine = nodes[0].machine().clone();
         handles.push(runtime::spawn(async move {
             let content = format!("hello, world {}", i);
             log::info!("Inserting [{}, {}]...", i, content);
@@ -71,18 +65,20 @@ async fn main() {
 
     log::info!("State changes were successful");
 
-    let name = node.name().clone();
-    let handles: Vec<_> = (0..10000)
-        .map(|i| {
-            let machine = node.machine().clone();
-            runtime::spawn(async move {
-                (i, await!(machine.get(i)).unwrap())
-            })
-        }).collect();
-    log::info!("{} {{", name);
-    for handle in handles {
-        let (key, value) = await!(handle);
-        log::info!("  {}: {}", key, value);
+    for node in nodes.iter() {
+        let id = node.id();
+        let handles: Vec<_> = (0..count)
+            .map(|i| {
+                let machine = node.machine().clone();
+                runtime::spawn(async move {
+                    (i, await!(machine.get(i)).ok())
+                })
+            }).collect();
+        log::info!("node {} {{", id);
+        for handle in handles {
+            let (key, value) = await!(handle);
+            log::info!("  {}: {:?}", key, value);
+        }
+        log::info!("}}");
     }
-    log::info!("}}");
 }

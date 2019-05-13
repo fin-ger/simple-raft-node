@@ -70,7 +70,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         mut connection_manager: C,
         request_rx: Receiver<Request<M>>,
     ) -> NodeResult<Self> {
-        log::debug!("creating core for node {}...", base_config.id);
+        log::debug!("creating core for node {} with gateway {:?}...", base_config.id, gateway);
 
         let mut new_transports = Vec::new();
         let conf_state = if let Some(gateway) = gateway {
