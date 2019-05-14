@@ -43,9 +43,9 @@ async fn main() {
         })
         .collect();
 
-    std::thread::sleep(std::time::Duration::from_secs(5));
+    std::thread::sleep(std::time::Duration::from_secs(7));
 
-    let count = 5;
+    let count = 10;
 
     let mut handles = Vec::new();
     for i in 0..count {
@@ -64,6 +64,7 @@ async fn main() {
     }
 
     log::info!("State changes were successful");
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     for node in nodes.iter() {
         let id = node.id();

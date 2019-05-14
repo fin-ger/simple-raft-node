@@ -4,7 +4,15 @@ use std::collections::HashMap;
 
 use failure::Backtrace;
 
-use crate::{Transport, TransportItem, TransportError, ConnectionManager, ConnectError, MachineCore};
+use crate::{
+    Transport,
+    TransportItem,
+    TransportError,
+    ConnectionManager,
+    ConnectError,
+    AddressError,
+    MachineCore,
+};
 
 pub struct MpscChannelConnectionManager<M: MachineCore> {
     transports: Arc<Mutex<HashMap<u64, Vec<MpscChannelTransport<M>>>>>,
@@ -49,21 +57,21 @@ impl<M: MachineCore> MpscChannelConnectionManager<M> {
             })
             .collect::<Vec<_>>()
     }
-
-    pub fn node_id(&self) -> u64 {
-        self.node_id
-    }
 }
 
 impl<M: MachineCore> ConnectionManager<M> for MpscChannelConnectionManager<M> {
     type Transport = MpscChannelTransport<M>;
+
+    fn listener_addr(&self) -> <Self::Transport as Transport<M>>::Address {
+        self.node_id
+    }
 
     fn accept(&mut self) -> Option<MpscChannelTransport<M>> {
         let dests: Vec<u64> = self.transports.lock().unwrap()
             .iter()
             .flat_map(|(src, transports)| {
                 if *src != self.node_id {
-                    if !transports.iter().any(|t| t.dest() == self.node_id) {
+                    if !transports.iter().any(|t| t.dest().unwrap() == self.node_id) {
                         return vec![*src];
                     }
                 }
@@ -76,7 +84,7 @@ impl<M: MachineCore> ConnectionManager<M> for MpscChannelConnectionManager<M> {
             let new_transport = self.transports.lock().unwrap()
                 .get_mut(&self.node_id)
                 .unwrap()
-                .drain_filter(|t| t.dest() == dest)
+                .drain_filter(|t| t.dest().unwrap() == dest)
                 .next();
 
             if let Some(transport) = new_transport {
@@ -99,7 +107,7 @@ impl<M: MachineCore> ConnectionManager<M> for MpscChannelConnectionManager<M> {
         log::debug!("attempting to connect from {} to {}", self.node_id, address);
         self.transports.lock().unwrap()
             .get_mut(&self.node_id).unwrap()
-            .drain_filter(|t| t.dest() == *address)
+            .drain_filter(|t| t.dest().unwrap() == *address)
             .next()
             .ok_or(ConnectError(
                 Box::new(std::io::Error::new(
@@ -114,19 +122,19 @@ impl<M: MachineCore> ConnectionManager<M> for MpscChannelConnectionManager<M> {
 pub struct MpscChannelTransport<M: MachineCore> {
     src_id: u64,
     dest_id: u64,
-    send: Sender<TransportItem<M>>,
-    recv: Receiver<TransportItem<M>>,
+    send: Sender<TransportItem<M, u64>>,
+    recv: Receiver<TransportItem<M, u64>>,
 }
 
 impl<M: MachineCore> Transport<M> for MpscChannelTransport<M> {
     type Address = u64;
 
-    fn send(&mut self, item: TransportItem<M>) -> Result<(), TransportError> {
+    fn send(&mut self, item: TransportItem<M, Self::Address>) -> Result<(), TransportError> {
         log::trace!("sending item {:?} over MPSC-channel transport", item);
         self.send.send(item).map_err(|_| TransportError::Disconnected(Backtrace::new()))
     }
 
-    fn try_recv(&mut self) -> Result<TransportItem<M>, TransportError> {
+    fn try_recv(&mut self) -> Result<TransportItem<M, Self::Address>, TransportError> {
         self.recv.try_recv().map_err(|e| {
             match e {
                 TryRecvError::Empty => TransportError::Empty(Backtrace::new()),
@@ -135,11 +143,11 @@ impl<M: MachineCore> Transport<M> for MpscChannelTransport<M> {
         })
     }
 
-    fn src(&self) -> u64 {
-        self.src_id
+    fn src(&self) -> Result<u64, AddressError> {
+        Ok(self.src_id)
     }
 
-    fn dest(&self) -> u64 {
-        self.dest_id
+    fn dest(&self) -> Result<u64, AddressError> {
+        Ok(self.dest_id)
     }
 }

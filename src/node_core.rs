@@ -41,7 +41,7 @@ use crate::{
     ConnectionManager,
 };
 
-// TODO change name to node_id (u64)
+// TODO: remove Option from raft_group
 pub struct NodeCore<M: MachineCore, C: ConnectionManager<M>, S: Storage> {
     id: u64,
     base_config: Config,
@@ -81,13 +81,15 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     cause: Box::new(e),
                     backtrace: Backtrace::new(),
                 })?;
-            new_transport.send(TransportItem::Hello(base_config.id))
-                .map_err(|e| NodeError::GatewayConnect {
-                    node_id: base_config.id,
-                    address: Box::new(gateway.clone()),
-                    cause: Box::new(e),
-                    backtrace: Backtrace::new(),
-                })?;
+            new_transport.send(TransportItem::Hello(
+                base_config.id,
+                connection_manager.listener_addr(),
+            )).map_err(|e| NodeError::GatewayConnect {
+                node_id: base_config.id,
+                address: Box::new(gateway.clone()),
+                cause: Box::new(e),
+                backtrace: Backtrace::new(),
+            })?;
             new_transports.push(new_transport);
             (vec![], vec![])
         } else {
@@ -263,7 +265,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         if let Some(raft_group) = self.raft_group.as_mut() {
             let leader = raft_group.raft.leader_id;
             let nodes = &raft_group.mut_store().writable().conf_state().nodes;
-            log::debug!("raft-state on node {}: {{ leader: {}, nodes: {:?} }}", self.id, leader, nodes);
+            log::trace!("raft-state on node {}: {{ leader: {}, nodes: {:?} }}", self.id, leader, nodes);
         }
 
         log::trace!("advancing node {}...", self.id);
@@ -277,7 +279,11 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
         'connection_manager: loop {
             if let Some(mut transport) = self.connection_manager.accept() {
-                log::debug!("accepted new connection on node {} from {:?}", node_id, transport.dest());
+                log::debug!(
+                    "accepted new connection on node {} from {:?}",
+                    node_id,
+                    transport.dest().ok(),
+                );
                 let conf_state = self.raft_group.as_ref().unwrap()
                     .get_store()
                     .readable()
@@ -289,8 +295,8 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     self.new_transports.push(transport);
                 } else {
                     log::error!(
-                        "failed to send welcome to node {} from node {}",
-                        transport.dest(),
+                        "failed to send welcome to node {:?} from node {}",
+                        transport.dest().ok(),
                         node_id,
                     );
                 }
@@ -306,9 +312,9 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             'new_transports: while i < self.new_transports.len() {
                 let transport = self.new_transports.get_mut(i).unwrap();
                 match transport.try_recv() {
-                    Ok(TransportItem::Hello(new_node_id)) => {
+                    Ok(TransportItem::Hello(new_node_id, peer_addr)) => {
                         log::debug!("received hello on node {} from node {}", node_id, new_node_id);
-                        let context = bincode::serialize(&transport.dest())
+                        let context = bincode::serialize(&peer_addr)
                             .map_err(|e| NodeError::NodeAdd {
                                 node_id,
                                 other_node: new_node_id,
@@ -361,7 +367,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     Err(TransportError::Disconnected(_)) => {
                         log::debug!(
                             "new transport from {:?} disconnected before sending hello or welcome on node {}, forgetting...",
-                            transport.dest(),
+                            transport.dest().ok(),
                             node_id,
                         );
                         self.new_transports.remove(i);
@@ -392,7 +398,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         log::trace!("received answer {:?} on transport {}", a, tp_id);
                         answers.push(a);
                     },
-                    Ok(TransportItem::Hello(_)) => {
+                    Ok(TransportItem::Hello(..)) => {
                         log::error!(
                             "hello received from node {} on node {} when already part of raft!",
                             tp_id,
@@ -410,7 +416,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     },
                     Err(TransportError::Empty(_)) => break,
                     Err(TransportError::Disconnected(_)) => {
-                        log::trace!("host for node {} is down!", transport.dest());
+                        log::trace!("host for node {:?} is down!", transport.dest().ok());
                         break;
                     },
                 }
@@ -515,7 +521,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             // if we know some leader
             match self.transports.get_mut(&self.raft_group.as_ref().unwrap().raft.leader_id) {
                 Some(leader) => {
-                    log::trace!("forwarding proposals to leader node {}", leader.dest());
+                    log::trace!("forwarding proposals to leader node {:?}", leader.dest().ok());
                     // forward proposals to leader
                     for proposal in self.proposals.drain(..) {
                         let id = proposal.id();
@@ -635,10 +641,27 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
                                     let in_transports = self.transports
                                         .values()
-                                        .find(|t| t.dest() == address);
+                                        .find(|t| {
+                                            // when the node is added via a conf-change,
+                                            // is must have previously send a hello containing
+                                            // the destination address. Therefore we can assume
+                                            // that unavailable destinations are not the correct
+                                            // transport.
+
+                                            match t.dest() {
+                                                Ok(dest) => dest == address,
+                                                Err(_) => false,
+                                            }
+                                        });
                                     let in_new_transports = self.new_transports
                                         .iter()
-                                        .find(|t| t.dest() == address);
+                                        .find(|t| {
+                                            // see explanation above
+                                            match t.dest() {
+                                                Ok(dest) => dest == address,
+                                                Err(_) => false,
+                                            }
+                                        });
                                     if in_transports.is_none() && in_new_transports.is_none() {
                                         log::debug!(
                                             "trying to connect to {:?} on node {}...",
