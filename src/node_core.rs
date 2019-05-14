@@ -9,8 +9,6 @@ use crossbeam::channel::{Receiver, Sender};
 use protobuf::Message as PbMessage;
 use raft::{StateRole, RawNode, Config};
 use raft::eraftpb::{
-    Message,
-    MessageType,
     EntryType,
     ConfChange,
     ConfChangeType,
@@ -41,12 +39,9 @@ use crate::{
     ConnectionManager,
 };
 
-// TODO: remove Option from raft_group
 pub struct NodeCore<M: MachineCore, C: ConnectionManager<M>, S: Storage> {
     id: u64,
-    base_config: Config,
-    // None if the raft is not initialized.
-    raft_group: Option<RawNode<WrappedStorage<S>>>,
+    raft_node: RawNode<WrappedStorage<S>>,
     connection_manager: C,
     new_transports: Vec<C::Transport>,
     transports: HashMap<u64, C::Transport>,
@@ -104,19 +99,16 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             })?;
         let wrapped_storage = WrappedStorage::new(storage);
 
-        let raft_group = Some(
-            RawNode::new(&base_config, wrapped_storage)
-                .map_err(|e| NodeError::Raft {
-                    node_id: base_config.id,
-                    cause: e,
-                    backtrace: Backtrace::new(),
-                })?
-        );
+        let raft_node = RawNode::new(&base_config, wrapped_storage)
+            .map_err(|e| NodeError::Raft {
+                node_id: base_config.id,
+                cause: e,
+                backtrace: Backtrace::new(),
+            })?;
 
         Ok(Self {
             id: base_config.id,
-            base_config,
-            raft_group,
+            raft_node,
             connection_manager,
             new_transports,
             transports: HashMap::new(),
@@ -133,55 +125,6 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
     pub fn id(&self) -> u64 {
         self.id
-    }
-
-    // Initialize raft for followers.
-    fn initialize_raft_from_message(&mut self, msg: &Message) -> NodeResult<()> {
-        if self.raft_group.is_some() {
-            return Ok(());
-        }
-
-        // if not initial message
-        let msg_type = msg.get_msg_type();
-        if msg_type != MessageType::MsgRequestVote
-            && msg_type != MessageType::MsgRequestPreVote
-            && !(msg_type == MessageType::MsgHeartbeat && msg.get_commit() == 0) {
-                return Ok(());
-            }
-
-        let id = msg.get_to();
-        // TODO: check if this code is really needed
-        let cfg = Config {
-            id,
-            tag: format!("node_{}", id),
-            ..self.base_config.clone()
-        };
-        let storage = Default::default();
-        self.raft_group = Some(
-            RawNode::new(&cfg, storage)
-                .map_err(|e| NodeError::Raft {
-                    node_id: self.id,
-                    cause: e,
-                    backtrace: Backtrace::new(),
-                })?
-        );
-
-        Ok(())
-    }
-
-    // Step a raft message, initialize the raft if need.
-    fn step(&mut self, msg: Message) -> NodeResult<()> {
-        self.initialize_raft_from_message(&msg)?;
-        self.raft_group
-            .as_mut()
-            // this option will never be `None` as it gets initialized above
-            .unwrap()
-            .step(msg)
-            .map_err(|e| NodeError::Raft {
-                node_id: self.id,
-                cause: e,
-                backtrace: Backtrace::new(),
-            })
     }
 
     fn send_response(&mut self, answer: Answer) -> NodeResult<()> {
@@ -216,10 +159,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
     fn get_proposals_from_requests(&mut self, timeout: &Instant) -> NodeResult<Vec<Proposal<M>>> {
         let mut proposals = Vec::new();
         loop {
-            let node_id = match self.raft_group {
-                Some(ref raft_group) => raft_group.raft.id,
-                None => break,
-            };
+            let node_id = self.raft_node.raft.id;
 
             // receive new requests from the user
             let request = match self.request_rx.try_recv() {
@@ -262,11 +202,9 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
     }
 
     pub fn advance(&mut self) -> NodeResult<()> {
-        if let Some(raft_group) = self.raft_group.as_mut() {
-            let leader = raft_group.raft.leader_id;
-            let nodes = &raft_group.mut_store().writable().conf_state().nodes;
-            log::trace!("raft-state on node {}: {{ leader: {}, nodes: {:?} }}", self.id, leader, nodes);
-        }
+        let leader = self.raft_node.raft.leader_id;
+        let nodes = &self.raft_node.mut_store().writable().conf_state().nodes;
+        log::trace!("raft-state on node {}: {{ leader: {}, nodes: {:?} }}", self.id, leader, nodes);
 
         log::trace!("advancing node {}...", self.id);
 
@@ -284,7 +222,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     node_id,
                     transport.dest().ok(),
                 );
-                let conf_state = self.raft_group.as_ref().unwrap()
+                let conf_state = self.raft_node
                     .get_store()
                     .readable()
                     .snapshot_metadata()
@@ -335,9 +273,8 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         log::debug!("received welcome on node {} from node {}", node_id, new_node_id);
                         let transport = self.new_transports.remove(i);
                         self.transports.insert(new_node_id, transport);
-                        let raft_group = self.raft_group.as_mut().unwrap();
                         for node in nodes {
-                            raft_group.raft.add_node(node)
+                            self.raft_node.raft.add_node(node)
                                 .map_err(|e| NodeError::NodeAdd {
                                     node_id,
                                     other_node: new_node_id,
@@ -347,7 +284,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         }
 
                         for learner in learners {
-                            raft_group.raft.add_learner(learner)
+                            self.raft_node.raft.add_learner(learner)
                                 .map_err(|e| NodeError::NodeAdd {
                                     node_id,
                                     other_node: new_node_id,
@@ -438,17 +375,17 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         }
 
         for msg in messages.drain(..) {
-            self.step(msg)?;
-        }
-
-        if self.raft_group.is_none() {
-            log::trace!("raft is not initialized yet on node {}", self.id);
-            return Ok(());
+            self.raft_node.step(msg)
+                .map_err(|e| NodeError::Raft {
+                    node_id,
+                    cause: e,
+                    backtrace: Backtrace::new(),
+                })?;
         }
 
         if self.timer.elapsed() >= Duration::from_millis(100) {
             // tick the raft.
-            self.raft_group.as_mut().unwrap().tick();
+            self.raft_node.tick();
             self.timer = Instant::now();
         }
 
@@ -456,7 +393,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         self.proposals.append(&mut new_proposals);
 
         // handle saved proposals if we are leader
-        if self.raft_group.as_ref().unwrap().raft.state == StateRole::Leader {
+        if self.raft_node.raft.state == StateRole::Leader {
             log::trace!("node {} is leader and handling proposals", self.id);
             let mut my_answers = Vec::new();
             // FIXME: only reading first 110 proposals, as otherwise the raft
@@ -473,7 +410,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             for proposal in self.proposals.drain(..end) {
                 let id = proposal.id();
                 let origin = proposal.origin();
-                let answer = match proposal.apply_on(self.raft_group.as_mut().unwrap()) {
+                let answer = match proposal.apply_on(&mut self.raft_node) {
                     Ok(None) => {
                         // if applying was successful:
                         // add to proposed vector when proposal originated by us
@@ -519,7 +456,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         } else {
             log::trace!("node {} is follower", self.id);
             // if we know some leader
-            match self.transports.get_mut(&self.raft_group.as_ref().unwrap().raft.leader_id) {
+            match self.transports.get_mut(&self.raft_node.raft.leader_id) {
                 Some(leader) => {
                     log::trace!("forwarding proposals to leader node {:?}", leader.dest().ok());
                     // forward proposals to leader
@@ -539,7 +476,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 },
                 None => {
                     // display the warning only after first leader election
-                    if self.raft_group.as_ref().unwrap().raft.leader_id > 0 {
+                    if self.raft_node.raft.leader_id > 0 {
                         log::warn!("Transport of leader not available, retrying on next tick...");
                     }
                 },
@@ -559,17 +496,17 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
     fn on_ready(&mut self) -> NodeResult<()> {
         // if raft is not initialized, return
-        if !self.raft_group.as_ref().unwrap().has_ready() {
+        if !self.raft_node.has_ready() {
             return Ok(());
         }
 
         let node_id = self.id;
 
         // get the `Ready` with `RawNode::ready` interface.
-        let mut ready = self.raft_group.as_mut().unwrap().ready();
+        let mut ready = self.raft_node.ready();
 
         {
-            let store = &mut self.raft_group.as_mut().unwrap().raft.raft_log.store;
+            let store = &mut self.raft_node.raft.raft_log.store;
 
             log::trace!("persisting raft logs...");
             // persistent raft logs. It's necessary because in `RawNode::advance` we stabilize
@@ -684,16 +621,16 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                         self.new_transports.push(transport);
                                     };
                                 }
-                                self.raft_group.as_mut().unwrap().raft.add_node(node_id)
+                                self.raft_node.raft.add_node(node_id)
                             },
                             ConfChangeType::RemoveNode => {
                                 log::debug!("conf-change removes node {} from raft", node_id);
                                 self.transports.remove(&node_id);
-                                self.raft_group.as_mut().unwrap().raft.remove_node(node_id)
+                                self.raft_node.raft.remove_node(node_id)
                             },
                             ConfChangeType::AddLearnerNode => {
                                 log::debug!("conf-change adds learner node {} to raft", node_id);
-                                self.raft_group.as_mut().unwrap().raft.add_learner(node_id)
+                                self.raft_node.raft.add_learner(node_id)
                             },
                             ConfChangeType::BeginMembershipChange
                                 | ConfChangeType::FinalizeMembershipChange => {
@@ -706,9 +643,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         })?;
 
                         let cs = ConfState::from(
-                            self.raft_group
-                                .as_ref()
-                                .unwrap()
+                            self.raft_node
                                 .raft.prs()
                                 .configuration()
                                 .clone()
@@ -717,7 +652,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             "writing new conf-state from conf-change to storage on node {}...",
                             self.id,
                         );
-                        self.raft_group.as_mut().unwrap().raft.raft_log.store
+                        self.raft_node.raft.raft_log.store
                             .writable()
                             .set_conf_state(cs)
                             .map_err(|e| NodeError::Storage {
@@ -747,7 +682,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
                 // if the context contains our node_id and one of our proposed proposals
                 // answer the client
-                if node_id == self.raft_group.as_ref().unwrap().raft.id
+                if node_id == self.raft_node.raft.id
                     && self.proposed.contains(&proposal_id)
                 {
                     log::debug!("delivering answer of proposal {} on node {}", proposal_id, self.id);
@@ -762,9 +697,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
             if let Some(last_committed) = committed_entries.last() {
                 log::debug!("writing new hard-state on node {} to storage...", self.id);
-                let store = self.raft_group
-                    .as_mut()
-                    .unwrap()
+                let store = self.raft_node
                     .raft
                     .raft_log
                     .store
@@ -784,7 +717,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
         log::trace!("finished processing the ready state, advancing raft...");
         // call `RawNode::advance` interface to update position flags in the raft.
-        self.raft_group.as_mut().unwrap().advance(ready);
+        self.raft_node.advance(ready);
 
         Ok(())
     }
