@@ -1,0 +1,9 @@
+language: minimal
+
+services:
+  - docker
+
+script:
+  - docker build -t fin1ger/simple-raft-node:example-helm -r examples/helm/Dockerfile .
+  - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+  - docker push fin1ger/simple-raft-node:example-helm
