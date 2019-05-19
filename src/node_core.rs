@@ -177,7 +177,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     proposals.push(Proposal::state_change(id, node_id, state_change));
                 },
                 RequestKind::StateRetrieval(identifier) => {
-                    let response = match self.machine.retrieve(&identifier) {
+                    let response = match self.machine.retrieve(identifier) {
                         // make the value a snapshot (a copy)
                         Ok(value) => Response::StateRetrieval(
                             StateRetrievalResult::Found(value.clone())
@@ -665,7 +665,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         log::debug!("received state-change entry on node {}", self.id);
                         // for state change proposals, tell the machine to change its state.
                         let state_change = bincode::deserialize(entry.get_data())
-                            .map_err(|e| NodeError::ConfChange {
+                            .map_err(|e| NodeError::StateChange {
                                 node_id,
                                 cause: Box::new(e),
                                 backtrace: Backtrace::new(),

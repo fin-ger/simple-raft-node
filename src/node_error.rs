@@ -54,6 +54,13 @@ pub enum NodeError {
         cause: Box<Fail>,
         backtrace: Backtrace,
     },
+    #[fail(display = "Failed to apply state change on node {}", node_id)]
+    StateChange {
+        node_id: u64,
+        #[cause]
+        cause: Box<Fail>,
+        backtrace: Backtrace,
+    },
     #[fail(display = "Failed to connect to gateway server at address {:?} on node {}", address, node_id)]
     GatewayConnect {
         node_id: u64,

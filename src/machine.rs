@@ -69,6 +69,6 @@ pub trait MachineCore: std::fmt::Debug + Clone + Send +'static {
     fn apply(&mut self, state_change: Self::StateChange);
     fn retrieve(
         &self,
-        state_identifier: &Self::StateIdentifier,
-    ) -> Result<&Self::StateValue, RequestError>;
+        state_identifier: Self::StateIdentifier,
+    ) -> Result<Self::StateValue, RequestError>;
 }

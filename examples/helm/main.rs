@@ -1,12 +1,46 @@
-#![feature(async_await, await_macro)]
+#![feature(async_await, await_macro, gen_future, decl_macro, proc_macro_hygiene)]
 
 use simple_raft_node::transports::TcpConnectionManager;
 use simple_raft_node::machines::HashMapMachine;
 use simple_raft_node::storages::MemStorage;
 use simple_raft_node::{Node, Config};
 
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use std::env;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, Ipv4Addr};
+
+use rocket::{State, routes, catchers, get, put, delete, catch};
+use regex::Regex;
+use futures::executor;
+
+#[catch(404)]
+fn not_found() -> &'static str {
+    "HTTP GET    /<key>\t get the content of <key>
+HTTP PUT    /<key>\t put content of request into <key>
+HTTP DELETE /<key>\t delete content of <key>"
+}
+
+#[get("/<key>")]
+fn get_handler(machine: State<HashMapMachine<String, String>>, key: String) -> String {
+    format!("{:?}\n", executor::block_on(machine.get(key)).ok())
+}
+
+#[put("/<key>", data = "<value>")]
+fn put_handler(machine: State<HashMapMachine<String, String>>, key: String, value: String) -> String {
+    match executor::block_on(machine.put(key, value)) {
+        Ok(_) => "Success\n",
+        Err(_) => "Failure\n",
+    }.into()
+}
+
+#[delete("/<key>")]
+fn delete_handler(machine: State<HashMapMachine<String, String>>, key: String) -> String {
+    match executor::block_on(machine.delete(key)) {
+        Ok(_) => "Success\n",
+        Err(_) => "Failure\n",
+    }.into()
+}
 
 #[runtime::main]
 async fn main() {
@@ -14,23 +48,28 @@ async fn main() {
 
     log::info!("Spawning nodes");
 
-    let node_id = env::var("NODE_ID")
-        .expect("Please specify a node id > 0!")
+    let node_id_msg = "Please specify a NODE_ID >= 0 via an environment variable!";
+    let re = Regex::new(r"\d+").unwrap();
+    let node_id_str = env::var("NODE_ID").expect(node_id_msg);
+    let mut node_id = re.find(node_id_str.as_str())
+        .expect(node_id_msg)
+        .as_str()
         .parse::<u64>()
-        .expect("Please specify a node id > 0!");
+        .expect(node_id_msg);
 
-    if node_id <= 0 {
-        panic!("Please specify a node id > 0!");
-    }
+    node_id += 1;
 
-    let gateway = if node_id != 1 {
-        Some("127.0.0.1:8081".parse::<SocketAddr>().unwrap())
-    } else {
-        None
-    };
-    let address = format!("127.0.0.1:{}", 8080 + node_id)
-        .parse::<SocketAddr>()
-        .unwrap();
+    let node_port = env::var("NODE_PORT")
+        .expect("Please specify a NODE_PORT (u16) via an environment variable!")
+        .parse::<u16>()
+        .expect("Please specify a NODE_PORT (u16) via an environment variable!");
+    let gateway = env::var("NODE_GATEWAY").ok()
+        .map(|gateway| gateway
+             .parse::<SocketAddr>()
+             .expect("The gateway address has an invalid IP or port!")
+        );
+
+    let address = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), node_port);
     let config = Config {
         id: node_id,
         tag: format!("node_{}", node_id),
@@ -38,7 +77,7 @@ async fn main() {
         heartbeat_tick: 3,
         ..Default::default()
     };
-    let machine = HashMapMachine::new();
+    let machine = HashMapMachine::<String, String>::new();
     let storage = MemStorage::new();
     let mgr = TcpConnectionManager::new(address).unwrap();
     let node = Node::new(
@@ -49,46 +88,39 @@ async fn main() {
         mgr,
     );
 
-    std::thread::sleep(std::time::Duration::from_secs(7));
+    let is_running = Arc::new(Mutex::new(true));
+    let handle = {
+        let is_running = is_running.clone();
+        let machine = node.machine().clone();
+        std::thread::spawn(move || {
+            let mut t = Instant::now();
+            loop {
+                if t.elapsed() >= Duration::from_secs(10) {
+                    if let Some(entries) = executor::block_on(machine.entries()).ok() {
+                        log::info!("node {} {{", node_id);
+                        for (key, value) in entries {
+                            log::info!("  {}: {:?}", key, value);
+                        }
+                        log::info!("}}");
+                    }
+                    t = Instant::now();
+                }
 
-    let count = 10;
+                if !*is_running.lock().unwrap() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        })
+    };
 
-    // we need at least 3 nodes, so for general hacking this is sufficient ;D
-    if node_id == 3 {
-        let mut handles = Vec::new();
-        for i in 0..count {
-            let machine = node.machine().clone();
-            handles.push(runtime::spawn(async move {
-                let content = format!("hello, world {}", i);
-                log::info!("Inserting [{}, {}]...", i, content);
-                let result = await!(machine.put(i, content.clone()));
-                log::info!("[{}, {}] has been inserted", i, content);
-                result
-            }));
-        }
+    rocket::ignite()
+        .mount("/", routes![
+            get_handler, put_handler, delete_handler
+        ])
+        .register(catchers![not_found])
+        .manage(node.machine().clone())
+        .launch();
 
-        for handle in handles.drain(..) {
-            await!(handle).unwrap();
-        }
-
-        log::info!("State changes were successful");
-    }
-
-    // wait until state-changes are done
-    std::thread::sleep(std::time::Duration::from_secs(1));
-
-    let id = node.id();
-    let handles: Vec<_> = (0..count)
-        .map(|i| {
-            let machine = node.machine().clone();
-            runtime::spawn(async move {
-                (i, await!(machine.get(i)).ok())
-            })
-        }).collect();
-    log::info!("node {} {{", id);
-    for handle in handles {
-        let (key, value) = await!(handle);
-        log::info!("  {}: {:?}", key, value);
-    }
-    log::info!("}}");
+    handle.join().expect("hash-map printer thread couldn't join");
 }
