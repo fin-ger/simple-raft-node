@@ -2,6 +2,7 @@ use std::net::{TcpStream, TcpListener, Shutdown, SocketAddr};
 use std::io::{BufReader, Cursor, BufRead, Write, ErrorKind};
 
 use failure::{Fail, Backtrace};
+use get_if_addrs::get_if_addrs;
 
 use crate::{
     Transport,
@@ -43,6 +44,13 @@ impl<M: MachineCore> ConnectionManager<M> for TcpConnectionManager<M> {
 
     fn listener_addr(&self) -> <Self::Transport as Transport<M>>::Address {
         self.local_addr
+    }
+
+    fn is_this_node(&self, addr: &<Self::Transport as Transport<M>>::Address) -> bool {
+        get_if_addrs()
+            .unwrap()
+            .iter()
+            .any(|iface| iface.ip() == addr.ip() && addr.port() == self.local_addr.port())
     }
 
     fn accept(&mut self) -> Option<TcpTransport<M>> {

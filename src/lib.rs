@@ -41,7 +41,6 @@ pub use request::*;
 
 pub use raft::Config;
 
-use log;
 use std::thread::{self, JoinHandle};
 use std::sync::{Arc, Mutex};
 

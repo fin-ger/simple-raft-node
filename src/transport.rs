@@ -38,6 +38,7 @@ pub trait ConnectionManager<M: MachineCore>: Send {
     type Transport: Transport<M>;
 
     fn listener_addr(&self) -> <Self::Transport as Transport<M>>::Address;
+    fn is_this_node(&self, addr: &<Self::Transport as Transport<M>>::Address) -> bool;
     fn accept(&mut self) -> Option<Self::Transport>;
     fn connect(
         &mut self,
