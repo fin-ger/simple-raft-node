@@ -87,8 +87,7 @@ async fn main() {
              .expect("The gateway address has an invalid IP or port!")
              .next()
              .expect("The gateway address does not resolve to a valid IP or port!")
-        );
-    log::info!("gateway: {:?}", gateway);
+        ).expect("The gateway address environment variable NODE_GATEWAY is not specified!");
 
     let address = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), node_port);
     let config = Config {

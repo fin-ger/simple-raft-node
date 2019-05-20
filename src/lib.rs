@@ -60,7 +60,7 @@ pub struct Node<M: Machine> {
 impl<M: Machine> Node<M> {
     pub fn new<C: ConnectionManager<M::Core> + 'static, S: Storage + 'static>(
         config: Config,
-        gateway: Option<<C::Transport as Transport<M::Core>>::Address>,
+        gateway: <C::Transport as Transport<M::Core>>::Address,
         mut machine: M,
         storage: S,
         connection_manager: C,

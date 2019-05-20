@@ -59,7 +59,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
     // Create a raft leader only with itself in its configuration.
     pub fn new(
         base_config: Config,
-        gateway: Option<<C::Transport as Transport<M>>::Address>,
+        gateway: <C::Transport as Transport<M>>::Address,
         machine: M,
         mut storage: S,
         mut connection_manager: C,
@@ -68,7 +68,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         log::debug!("creating core for node {} with gateway {:?}...", base_config.id, gateway);
 
         let mut new_transports = Vec::new();
-        let conf_state = if let Some(gateway) = gateway {
+        let conf_state = if !connection_manager.is_this_node(&gateway) {
             let mut new_transport = connection_manager.connect(&gateway)
                 .map_err(|e| NodeError::GatewayConnect {
                     node_id: base_config.id,
