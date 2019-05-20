@@ -8,17 +8,33 @@ use simple_raft_node::{Node, Config};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::env;
+use std::io::Read;
 use std::net::{SocketAddr, Ipv4Addr};
 
-use rocket::{State, routes, catchers, get, put, delete, catch};
+use rocket::{State, Data, routes, get, put, delete};
 use regex::Regex;
 use futures::executor;
 
-#[catch(404)]
-fn not_found() -> &'static str {
-    "HTTP GET    /<key>\t get the content of <key>
+#[get("/")]
+fn index_handler(machine: State<HashMapMachine<String, String>>) -> String {
+    format!(
+        "Using the API:
+HTTP GET    /<key>\t get the content of <key>
 HTTP PUT    /<key>\t put content of request into <key>
-HTTP DELETE /<key>\t delete content of <key>"
+HTTP DELETE /<key>\t delete content of <key>
+
+HashMap contents:
+{{
+{}
+}}
+",
+        executor::block_on(machine.entries())
+            .unwrap()
+            .iter()
+            .map(|(k, v)| format!("  \"{}\": \"{}\"", k, v))
+            .collect::<Vec<_>>()
+            .join(",\n"),
+    )
 }
 
 #[get("/<key>")]
@@ -27,8 +43,10 @@ fn get_handler(machine: State<HashMapMachine<String, String>>, key: String) -> S
 }
 
 #[put("/<key>", data = "<value>")]
-fn put_handler(machine: State<HashMapMachine<String, String>>, key: String, value: String) -> String {
-    match executor::block_on(machine.put(key, value)) {
+fn put_handler(machine: State<HashMapMachine<String, String>>, key: String, value: Data) -> String {
+    let mut s = String::new();
+    value.open().read_to_string(&mut s).unwrap();
+    match executor::block_on(machine.put(key, s)) {
         Ok(_) => "Success\n",
         Err(_) => "Failure\n",
     }.into()
@@ -116,9 +134,8 @@ async fn main() {
 
     rocket::ignite()
         .mount("/", routes![
-            get_handler, put_handler, delete_handler
+            index_handler, get_handler, put_handler, delete_handler
         ])
-        .register(catchers![not_found])
         .manage(node.machine().clone())
         .launch();
 
