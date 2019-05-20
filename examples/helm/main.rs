@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::env;
 use std::io::Read;
-use std::net::{SocketAddr, Ipv4Addr};
+use std::net::{ToSocketAddrs, SocketAddr, Ipv4Addr};
 
 use rocket::{State, Data, routes, get, put, delete};
 use regex::Regex;
@@ -83,9 +83,12 @@ async fn main() {
         .expect("Please specify a NODE_PORT (u16) via an environment variable!");
     let gateway = env::var("NODE_GATEWAY").ok()
         .map(|gateway| gateway
-             .parse::<SocketAddr>()
+             .to_socket_addrs()
              .expect("The gateway address has an invalid IP or port!")
+             .next()
+             .expect("The gateway address does not resolve to a valid IP or port!")
         );
+    log::info!("gateway: {:?}", gateway);
 
     let address = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), node_port);
     let config = Config {
