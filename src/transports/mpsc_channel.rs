@@ -66,10 +66,6 @@ impl<M: MachineCore> ConnectionManager<M> for MpscChannelConnectionManager<M> {
         self.node_id
     }
 
-    fn is_this_node(&self, addr: &<Self::Transport as Transport<M>>::Address) -> bool {
-        *addr == self.node_id
-    }
-
     fn accept(&mut self) -> Option<MpscChannelTransport<M>> {
         let dests: Vec<u64> = self.transports.lock().unwrap()
             .iter()

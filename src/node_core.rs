@@ -68,7 +68,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         log::debug!("creating core for node {} with gateway {:?}...", base_config.id, gateway);
 
         let mut new_transports = Vec::new();
-        let conf_state = if !connection_manager.is_this_node(&gateway) {
+        let conf_state = if base_config.id != 1 {
             let mut new_transport = connection_manager.connect(&gateway)
                 .map_err(|e| NodeError::GatewayConnect {
                     node_id: base_config.id,
