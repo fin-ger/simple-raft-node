@@ -98,7 +98,7 @@ async fn main() {
             }
         }).expect("The gateway address environment variable NODE_GATEWAY is not specified!");
 
-    let address = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), node_port);
+    let address = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), node_port);
     let config = Config {
         id: node_id,
         tag: format!("node_{}", node_id),

@@ -38,17 +38,13 @@ spec:
             - name: RUST_LOG
               value: info
           ports:
-            - name: http
-              containerPort: 8080
-              protocol: TCP
-            - name: raft
-              containerPort: 1337
-              protocol: TCP
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 8080
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 8080
+            - containerPort: 8080
+            - containerPort: 1337
+          #livenessProbe:
+          #  httpGet:
+          #    path: /
+          #    port: 8080
+          #readinessProbe:
+          #  httpGet:
+          #    path: /
+          #    port: 8080
