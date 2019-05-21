@@ -9,14 +9,9 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 spec:
   type: {{ .Values.service.type }}
-  clusterIP: None
   ports:
     - port: {{ .Values.service.port }}
       targetPort: 8080
-      name: api
-    - port: 1337
-      targetPort: 1337
-      name: raft
   selector:
     app.kubernetes.io/name: {{ include "simple-raft-node-example.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}

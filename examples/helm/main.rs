@@ -16,9 +16,11 @@ use regex::Regex;
 use futures::executor;
 
 #[get("/")]
-fn index_handler(machine: State<HashMapMachine<String, String>>) -> String {
+fn index_handler(node_id: State<u64>, machine: State<HashMapMachine<String, String>>) -> String {
     format!(
-        "Using the API:
+        "Response from node {}
+
+Using the API:
 HTTP GET    /<key>\t get the content of <key>
 HTTP PUT    /<key>\t put content of request into <key>
 HTTP DELETE /<key>\t delete content of <key>
@@ -28,6 +30,7 @@ HashMap contents:
 {}
 }}
 ",
+        *node_id,
         executor::block_on(machine.entries())
             .unwrap()
             .iter()
@@ -159,6 +162,7 @@ async fn main() {
             index_handler, get_handler, put_handler, delete_handler
         ])
         .manage(node.machine().clone())
+        .manage(node_id)
         .launch();
 
     handle.join().expect("hash-map printer thread couldn't join");
