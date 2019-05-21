@@ -25,8 +25,12 @@ spec:
           image: fin1ger/simple-raft-node:example-helm
           imagePullPolicy: Always
           env:
-            - name: NODE_PORT
-              value: "1337"
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_ADDRESS
+              value: $(NODE_IP):1337
             - name: NODE_ID
               valueFrom:
                 fieldRef:
