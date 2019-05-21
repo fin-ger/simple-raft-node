@@ -64,6 +64,11 @@ fn delete_handler(machine: State<HashMapMachine<String, String>>, key: String) -
 async fn main() {
     env_logger::init();
 
+    // this is a shit-fix as kubernetes cannot resolve the gateway hostname within 30 seconds
+    // after startup reliably. This issue is tracked in
+    //     https://github.com/kubernetes/kubernetes/issues/78128
+    std::thread::sleep(Duration::from_secs(30));
+
     log::info!("Spawning nodes");
 
     let node_id_msg = "Please specify a NODE_ID >= 0 via an environment variable!";
@@ -129,7 +134,7 @@ async fn main() {
                 if !*is_running.lock().unwrap() {
                     return;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(10));
             }
         })
     };
