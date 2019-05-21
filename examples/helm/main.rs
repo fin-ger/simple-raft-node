@@ -64,11 +64,6 @@ fn delete_handler(machine: State<HashMapMachine<String, String>>, key: String) -
 async fn main() {
     env_logger::init();
 
-    // this is a shit-fix as kubernetes cannot resolve the gateway hostname within 30 seconds
-    // after startup reliably. This issue is tracked in
-    //     https://github.com/kubernetes/kubernetes/issues/78128
-    std::thread::sleep(Duration::from_secs(30));
-
     log::info!("Spawning nodes");
 
     let node_id_msg = "Please specify a NODE_ID >= 0 via an environment variable!";
@@ -87,12 +82,21 @@ async fn main() {
         .parse::<u16>()
         .expect("Please specify a NODE_PORT (u16) via an environment variable!");
     let gateway = env::var("NODE_GATEWAY").ok()
-        .map(|gateway| gateway
-             .to_socket_addrs()
-             .expect("The gateway address has an invalid IP or port!")
-             .next()
-             .expect("The gateway address does not resolve to a valid IP or port!")
-        ).expect("The gateway address environment variable NODE_GATEWAY is not specified!");
+        .map(|gateway| {
+            loop {
+                log::info!("Trying to connect to gateway {}...", gateway);
+                match gateway.to_socket_addrs() {
+                    Ok(mut addr) => {
+                        return addr
+                            .next()
+                            .expect("The gateway address does not resolve to a valid IP or port!");
+                    },
+                    Err(e) => {
+                        log::warn!("Could not resolve gateway {}: {}", gateway, e);
+                    },
+                }
+            }
+        }).expect("The gateway address environment variable NODE_GATEWAY is not specified!");
 
     let address = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), node_port);
     let config = Config {
