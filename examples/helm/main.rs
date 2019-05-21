@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::env;
 use std::io::Read;
-use std::net::{ToSocketAddrs, SocketAddr, Ipv4Addr};
+use std::net::ToSocketAddrs;
 
 use rocket::{State, Data, routes, get, put, delete};
 use regex::Regex;
@@ -77,14 +77,26 @@ async fn main() {
 
     node_id += 1;
 
-    let node_port = env::var("NODE_PORT")
-        .expect("Please specify a NODE_PORT (u16) via an environment variable!")
-        .parse::<u16>()
-        .expect("Please specify a NODE_PORT (u16) via an environment variable!");
+    let node_address = env::var("NODE_ADDRESS").ok()
+        .map(|address| {
+            loop {
+                log::info!("Trying to resolve binding IP address {}...", address);
+                match address.to_socket_addrs() {
+                    Ok(mut addr) => {
+                        return addr
+                            .next()
+                            .expect("The binding address does not resolve to a valid IP or port!");
+                    },
+                    Err(e) => {
+                        log::warn!("Could not resolve binding address {}: {}", address, e);
+                    },
+                }
+            }
+        }).expect("Please specify a NODE_ADDRESS (domain:port) via an environment variable!");
     let gateway = env::var("NODE_GATEWAY").ok()
         .map(|gateway| {
             loop {
-                log::info!("Trying to connect to gateway {}...", gateway);
+                log::info!("Trying to resolve gateway address {}...", gateway);
                 match gateway.to_socket_addrs() {
                     Ok(mut addr) => {
                         return addr
@@ -98,7 +110,6 @@ async fn main() {
             }
         }).expect("The gateway address environment variable NODE_GATEWAY is not specified!");
 
-    let address = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), node_port);
     let config = Config {
         id: node_id,
         tag: format!("node_{}", node_id),
@@ -108,7 +119,7 @@ async fn main() {
     };
     let machine = HashMapMachine::<String, String>::new();
     let storage = MemStorage::new();
-    let mgr = TcpConnectionManager::new(address).unwrap();
+    let mgr = TcpConnectionManager::new(node_address).unwrap();
     let node = Node::new(
         config,
         gateway,
