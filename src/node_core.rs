@@ -276,6 +276,13 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 );
                                 self.new_transports.remove(i);
                             } else {
+                                log::info!(
+                                    concat!(
+                                        "removing existing node {} from the raft as a new node ",
+                                        "with the same id is about to join",
+                                    ),
+                                    new_node_id,
+                                );
                                 // remove existing node from cluster as the newly connected
                                 // node can be (although it has the same id) another physical
                                 // cluster node. Before we can add the new physical cluster node
@@ -718,7 +725,11 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 self.transports.remove(&node_id);
                                 let res = self.raft_node.raft.remove_node(node_id);
 
-                                if let NodeRemovalContext::AddNewNode { node_id: new_node_id, address } = ctx {
+                                if let NodeRemovalContext::AddNewNode {
+                                    node_id: new_node_id,
+                                    address
+                                } = ctx {
+                                    log::info!("adding new node {} to the raft", new_node_id);
                                     let context = bincode::serialize(&address)
                                         .map_err(|e| NodeError::NodeAdd {
                                             node_id,
