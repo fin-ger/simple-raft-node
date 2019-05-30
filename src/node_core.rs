@@ -293,6 +293,22 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
                             }
                         } else {
+                            let context = bincode::serialize(&peer_addr)
+                                .map_err(|e| NodeError::NodeAdd {
+                                    node_id,
+                                    other_node: new_node_id,
+                                    cause: Box::new(e),
+                                    backtrace: Backtrace::new(),
+                                })?;
+                            let mut conf_change = ConfChange::new();
+                            conf_change.set_node_id(new_node_id);
+                            conf_change.set_change_type(ConfChangeType::AddNode);
+                            conf_change.set_context(context);
+                            let id = self.proposal_id;
+                            self.proposal_id += 1;
+                            self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
+                            let mut transport = self.new_transports.remove(i);
+
                             let conf_state = self.raft_node
                                 .get_store()
                                 .readable()
@@ -308,21 +324,6 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 );
                             }
 
-                            let context = bincode::serialize(&peer_addr)
-                                .map_err(|e| NodeError::NodeAdd {
-                                    node_id,
-                                    other_node: new_node_id,
-                                    cause: Box::new(e),
-                                    backtrace: Backtrace::new(),
-                                })?;
-                            let mut conf_change = ConfChange::new();
-                            conf_change.set_node_id(new_node_id);
-                            conf_change.set_change_type(ConfChangeType::AddNode);
-                            conf_change.set_context(context);
-                            let id = self.proposal_id;
-                            self.proposal_id += 1;
-                            self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
-                            let transport = self.new_transports.remove(i);
                             self.transports.insert(new_node_id, transport);
                         }
                     },
@@ -666,50 +667,21 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                             backtrace: Backtrace::new(),
                                         })?;
 
-                                    let in_transports = self.transports
-                                        .values()
-                                        .find(|t| {
-                                            // when the node is added via a conf-change,
-                                            // is must have previously send a hello containing
-                                            // the destination address. Therefore we can assume
-                                            // that unavailable destinations are not the correct
-                                            // transport.
-
-                                            match t.dest() {
-                                                Ok(dest) => dest == address,
-                                                Err(_) => false,
-                                            }
-                                        });
-                                    let in_new_transports = self.new_transports
-                                        .iter()
-                                        .find(|t| {
-                                            // see explanation above
-                                            match t.dest() {
-                                                Ok(dest) => dest == address,
-                                                Err(_) => false,
-                                            }
-                                        });
-                                    if in_transports.is_none() && in_new_transports.is_none() {
-                                        log::debug!(
-                                            "trying to connect to {:?} on node {}...",
-                                            address,
-                                            self.id,
-                                        );
-                                        let mut transport = self.connection_manager.connect(&address)
-                                            .map_err(|e| NodeError::ConfChange {
-                                                node_id: self.id,
-                                                cause: Box::new(e),
-                                                backtrace: Backtrace::new(),
-                                            })?;
-
-                                        transport.send(TransportItem::Welcome(self.id, vec![], vec![]))
-                                            .map_err(|e| NodeError::ConfChange {
-                                                node_id: self.id,
-                                                cause: Box::new(e),
-                                                backtrace: Backtrace::new(),
-                                            })?;
-                                        self.new_transports.push(transport);
-                                    };
+                                    // always reconnect to the new node and wait for the old
+                                    // transport in new_transports to be disconnected from the
+                                    // remove end
+                                    log::debug!(
+                                        "trying to connect to {:?} on node {}...",
+                                        address,
+                                        self.id,
+                                    );
+                                    let transport = self.connection_manager.connect(&address)
+                                        .map_err(|e| NodeError::ConfChange {
+                                            node_id: self.id,
+                                            cause: Box::new(e),
+                                            backtrace: Backtrace::new(),
+                                        })?;
+                                    self.transports.insert(node_id, transport);
                                 }
                                 self.raft_node.raft.add_node(node_id)
                             },
@@ -726,6 +698,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 self.transports.remove(&node_id);
                                 let res = self.raft_node.raft.remove_node(node_id);
 
+                                let node_id = self.id;
                                 if let NodeRemovalContext::AddNewNode {
                                     node_id: new_node_id,
                                     address

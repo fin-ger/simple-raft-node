@@ -41,6 +41,8 @@ spec:
               value: {{ include "simple-raft-node-example.fullname" . }}-0.{{ include "simple-raft-node-example.fullname" . }}:1337
             - name: RUST_LOG
               value: debug
+            - name: RUST_LOG_STYLE
+              value: always
           ports:
             - containerPort: 8080
             - containerPort: 1337
