@@ -685,7 +685,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                     // nothing but move the transport from new_transports to the
                                     // transports map on the remote end.
                                     if transport.send(TransportItem::Welcome(
-                                        node_id, vec![], vec![]
+                                        self.id, vec![], vec![]
                                     )).is_err() {
                                         log::error!(
                                             "failed to send welcome to node {:?} from node {}",
