@@ -675,12 +675,24 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                         address,
                                         self.id,
                                     );
-                                    let transport = self.connection_manager.connect(&address)
+                                    let mut transport = self.connection_manager.connect(&address)
                                         .map_err(|e| NodeError::ConfChange {
                                             node_id: self.id,
                                             cause: Box::new(e),
                                             backtrace: Backtrace::new(),
                                         })?;
+                                    // we have to send another welcome that will essentially do
+                                    // nothing but move the transport from new_transports to the
+                                    // transports map on the remote end.
+                                    if transport.send(TransportItem::Welcome(
+                                        node_id, vec![], vec![]
+                                    )).is_err() {
+                                        log::error!(
+                                            "failed to send welcome to node {:?} from node {}",
+                                            transport.dest().ok(),
+                                            node_id,
+                                        );
+                                    }
                                     self.transports.insert(node_id, transport);
                                 }
                                 self.raft_node.raft.add_node(node_id)
