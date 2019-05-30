@@ -1,5 +1,5 @@
 use failure::{Fail, Backtrace};
-use crate::{Address, TransportError};
+use crate::TransportError;
 
 #[derive(Debug, Fail)]
 pub enum NodeError {
@@ -64,7 +64,7 @@ pub enum NodeError {
     #[fail(display = "Failed to connect to gateway server at address {:?} on node {}", address, node_id)]
     GatewayConnect {
         node_id: u64,
-        address: Box<Address>,
+        address: String,
         #[cause]
         cause: Box<Fail>,
         backtrace: Backtrace,

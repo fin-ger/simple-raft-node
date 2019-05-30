@@ -73,7 +73,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             let mut new_transport = connection_manager.connect(&gateway)
                 .map_err(|e| NodeError::GatewayConnect {
                     node_id: base_config.id,
-                    address: Box::new(gateway.clone()),
+                    address: format!("{}", gateway),
                     cause: Box::new(e),
                     backtrace: Backtrace::new(),
                 })?;
@@ -82,7 +82,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 connection_manager.listener_addr(),
             )).map_err(|e| NodeError::GatewayConnect {
                 node_id: base_config.id,
-                address: Box::new(gateway.clone()),
+                address: format!("{}", gateway),
                 cause: Box::new(e),
                 backtrace: Backtrace::new(),
             })?;
