@@ -19,10 +19,25 @@ pub struct Answer {
     pub kind: AnswerKind,
 }
 
+/// Stores from which node the proposal originated,
+/// in order to deliver the answer to the proposal to
+/// the correct node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
     pub proposal_id: u64,
     pub node_id: u64,
+}
+
+/// Stores the context for a ConfChange::RemoveNode message.
+/// It can be used to specify a ConfChange::NodeAdd action that
+/// will be triggered directly after the node removal was successful.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum NodeRemovalContext<A> {
+    None,
+    AddNewNode {
+        node_id: u64,
+        address: A,
+    },
 }
 
 impl TryInto<Vec<u8>> for Context {

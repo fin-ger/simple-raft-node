@@ -31,6 +31,7 @@ use crate::{
     Answer,
     AnswerKind,
     Context,
+    NodeRemovalContext,
     Request,
     RequestKind,
     Response,
@@ -85,7 +86,6 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 cause: Box::new(e),
                 backtrace: Backtrace::new(),
             })?;
-            // TODO: crash after timeout (no welcome received)
             new_transports.push(new_transport);
             (vec![], vec![])
         } else {
@@ -202,6 +202,17 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         Ok(proposals)
     }
 
+    fn handle_disconnect(&self) -> NodeResult<()> {
+        if self.transports.len() == 0 && self.new_transports.len() == 0 {
+            return Err(NodeError::AllTransportsClosed {
+                node_id: self.id(),
+                backtrace: Backtrace::new(),
+            });
+        }
+
+        Ok(())
+    }
+
     pub fn advance(&mut self) -> NodeResult<()> {
         let leader = self.raft_node.raft.leader_id;
         let nodes = &self.raft_node.mut_store().writable().conf_state().nodes;
@@ -253,24 +264,59 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 match transport.try_recv() {
                     Ok(TransportItem::Hello(new_node_id, peer_addr)) => {
                         log::debug!("received hello on node {} from node {}", node_id, new_node_id);
-                        let context = bincode::serialize(&peer_addr)
-                            .map_err(|e| NodeError::NodeAdd {
-                                node_id,
-                                other_node: new_node_id,
-                                cause: Box::new(e),
-                                backtrace: Backtrace::new(),
-                            })?;
-                        // TODO: check if node already exists
-                        // TODO: check if elapsed ticks since last heartbeat is greater than 5
-                        let mut conf_change = ConfChange::new();
-                        conf_change.set_node_id(new_node_id);
-                        conf_change.set_change_type(ConfChangeType::AddNode);
-                        conf_change.set_context(context);
-                        let id = self.proposal_id;
-                        self.proposal_id += 1;
-                        self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
-                        let transport = self.new_transports.remove(i);
-                        self.transports.insert(new_node_id, transport);
+                        if let Some(progress) = self.raft_node.raft.prs().get(new_node_id) {
+                            if progress.recent_active {
+                                log::warn!(
+                                    concat!(
+                                        "dropping incoming connection on node {} ",
+                                        "from new node {} as the node is already active",
+                                    ),
+                                    node_id,
+                                    new_node_id,
+                                );
+                                self.new_transports.remove(i);
+                            } else {
+                                // remove existing node from cluster as the newly connected
+                                // node can be (although it has the same id) another physical
+                                // cluster node. Before we can add the new physical cluster node
+                                // to the raft, we have to safely remove the old node from the
+                                // cluster. In order to add the new node to the cluster after
+                                // successful removal, we have to carry a context containing all
+                                // needed information for adding the new node to the cluster.
+                                let context = bincode::serialize(&NodeRemovalContext::AddNewNode {
+                                    node_id: new_node_id,
+                                    address: peer_addr,
+                                }).map_err(|e| NodeError::ConfChange {
+                                    node_id,
+                                    cause: Box::new(e),
+                                    backtrace: Backtrace::new(),
+                                })?;
+                                let mut conf_change = ConfChange::new();
+                                conf_change.set_node_id(new_node_id);
+                                conf_change.set_change_type(ConfChangeType::RemoveNode);
+                                conf_change.set_context(context);
+                                let id = self.proposal_id;
+                                self.proposal_id += 1;
+                                self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
+                            }
+                        } else {
+                            let context = bincode::serialize(&peer_addr)
+                                .map_err(|e| NodeError::NodeAdd {
+                                    node_id,
+                                    other_node: new_node_id,
+                                    cause: Box::new(e),
+                                    backtrace: Backtrace::new(),
+                                })?;
+                            let mut conf_change = ConfChange::new();
+                            conf_change.set_node_id(new_node_id);
+                            conf_change.set_change_type(ConfChangeType::AddNode);
+                            conf_change.set_context(context);
+                            let id = self.proposal_id;
+                            self.proposal_id += 1;
+                            self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
+                            let transport = self.new_transports.remove(i);
+                            self.transports.insert(new_node_id, transport);
+                        }
                     },
                     Ok(TransportItem::Welcome(new_node_id, nodes, learners)) => {
                         log::debug!("received welcome on node {} from node {}", node_id, new_node_id);
@@ -311,6 +357,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             node_id,
                         );
                         self.new_transports.remove(i);
+                        self.handle_disconnect()?;
                     }
                 }
 
@@ -345,7 +392,21 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             node_id,
                         );
                         to_disconnect.push(*tp_id);
-                        // FIXME: remove node from cluster (disconnect on all nodes)
+
+                        let context = bincode::serialize(
+                            &NodeRemovalContext::<<C::Transport as Transport<M>>::Address>::None
+                        ).map_err(|e| NodeError::ConfChange {
+                            node_id,
+                            cause: Box::new(e),
+                            backtrace: Backtrace::new(),
+                        })?;
+                        let mut conf_change = ConfChange::new();
+                        conf_change.set_node_id(*tp_id);
+                        conf_change.set_change_type(ConfChangeType::RemoveNode);
+                        conf_change.set_context(context);
+                        let id = self.proposal_id;
+                        self.proposal_id += 1;
+                        self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
                     },
                     Ok(TransportItem::Welcome(..)) => {
                         log::error!(
@@ -354,11 +415,26 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             node_id,
                         );
                         to_disconnect.push(*tp_id);
-                        // FIXME: remove node from cluster (disconnect on all nodes)
+
+                        let context = bincode::serialize(
+                            &NodeRemovalContext::<<C::Transport as Transport<M>>::Address>::None
+                        ).map_err(|e| NodeError::ConfChange {
+                            node_id,
+                            cause: Box::new(e),
+                            backtrace: Backtrace::new(),
+                        })?;
+                        let mut conf_change = ConfChange::new();
+                        conf_change.set_node_id(*tp_id);
+                        conf_change.set_change_type(ConfChangeType::RemoveNode);
+                        conf_change.set_context(context);
+                        let id = self.proposal_id;
+                        self.proposal_id += 1;
+                        self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
                     },
                     Err(TransportError::Empty(_)) => break,
                     Err(TransportError::Disconnected(_)) => {
                         log::trace!("host for node {:?} is down!", transport.dest().ok());
+                        to_disconnect.push(*tp_id);
                         break;
                     },
                 }
@@ -371,6 +447,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
 
         for id in to_disconnect.drain(..) {
             self.transports.remove(&id);
+            self.handle_disconnect()?;
         }
 
         for answer in answers.drain(..) {
@@ -630,8 +707,46 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             },
                             ConfChangeType::RemoveNode => {
                                 log::debug!("conf-change removes node {} from raft", node_id);
+                                let ctx: NodeRemovalContext<<C::Transport as Transport<M>>::Address> =
+                                    bincode::deserialize(cc.get_context())
+                                    .map_err(|e| NodeError::ConfChange {
+                                        node_id: self.id,
+                                        cause: Box::new(e),
+                                        backtrace: Backtrace::new(),
+                                    })?;
+
                                 self.transports.remove(&node_id);
-                                self.raft_node.raft.remove_node(node_id)
+                                let res = self.raft_node.raft.remove_node(node_id);
+
+                                if let NodeRemovalContext::AddNewNode { node_id: new_node_id, address } = ctx {
+                                    let context = bincode::serialize(&address)
+                                        .map_err(|e| NodeError::NodeAdd {
+                                            node_id,
+                                            other_node: new_node_id,
+                                            cause: Box::new(e),
+                                            backtrace: Backtrace::new(),
+                                        })?;
+                                    let mut conf_change = ConfChange::new();
+                                    conf_change.set_node_id(new_node_id);
+                                    conf_change.set_change_type(ConfChangeType::AddNode);
+                                    conf_change.set_context(context);
+                                    let id = self.proposal_id;
+                                    self.proposal_id += 1;
+                                    self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
+                                    let transport = self.new_transports.drain_filter(|t| {
+                                        t.dest().unwrap() == address
+                                    }).next().ok_or(NodeError::ConfChange {
+                                        node_id,
+                                        cause: Box::new(failure::err_msg(format!(
+                                            "cannot add node {}  as transport is not available",
+                                            new_node_id,
+                                        )).compat()),
+                                        backtrace: Backtrace::new(),
+                                    })?;
+                                    self.transports.insert(new_node_id, transport);
+                                }
+
+                                res
                             },
                             ConfChangeType::AddLearnerNode => {
                                 log::debug!("conf-change adds learner node {} to raft", node_id);

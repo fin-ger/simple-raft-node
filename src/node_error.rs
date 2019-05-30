@@ -69,6 +69,11 @@ pub enum NodeError {
         cause: Box<Fail>,
         backtrace: Backtrace,
     },
+    #[fail(display = "The node {} has no active connections to the cluster", node_id)]
+    AllTransportsClosed {
+        node_id: u64,
+        backtrace: Backtrace,
+    },
 }
 
 pub type NodeResult<T> = std::result::Result<T, NodeError>;
