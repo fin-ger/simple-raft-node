@@ -85,6 +85,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 cause: Box::new(e),
                 backtrace: Backtrace::new(),
             })?;
+            // TODO: crash after timeout (no welcome received)
             new_transports.push(new_transport);
             (vec![], vec![])
         } else {
@@ -259,6 +260,8 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 cause: Box::new(e),
                                 backtrace: Backtrace::new(),
                             })?;
+                        // TODO: check if node already exists
+                        // TODO: check if elapsed ticks since last heartbeat is greater than 5
                         let mut conf_change = ConfChange::new();
                         conf_change.set_node_id(new_node_id);
                         conf_change.set_change_type(ConfChangeType::AddNode);
@@ -342,6 +345,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             node_id,
                         );
                         to_disconnect.push(*tp_id);
+                        // FIXME: remove node from cluster (disconnect on all nodes)
                     },
                     Ok(TransportItem::Welcome(..)) => {
                         log::error!(
@@ -350,6 +354,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             node_id,
                         );
                         to_disconnect.push(*tp_id);
+                        // FIXME: remove node from cluster (disconnect on all nodes)
                     },
                     Err(TransportError::Empty(_)) => break,
                     Err(TransportError::Disconnected(_)) => {
