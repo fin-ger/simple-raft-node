@@ -228,28 +228,13 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         let node_id = self.id;
 
         'connection_manager: loop {
-            if let Some(mut transport) = self.connection_manager.accept() {
+            if let Some(transport) = self.connection_manager.accept() {
                 log::debug!(
                     "accepted new connection on node {} from {:?}",
                     node_id,
                     transport.dest().ok(),
                 );
-                let conf_state = self.raft_node
-                    .get_store()
-                    .readable()
-                    .snapshot_metadata()
-                    .get_conf_state();
-                if let Ok(()) = transport.send(TransportItem::Welcome(
-                    node_id, conf_state.nodes.clone(), conf_state.learners.clone()
-                )) {
-                    self.new_transports.push(transport);
-                } else {
-                    log::error!(
-                        "failed to send welcome to node {:?} from node {}",
-                        transport.dest().ok(),
-                        node_id,
-                    );
-                }
+                self.new_transports.push(transport);
             }
 
             if timeout.elapsed() >= Duration::from_millis(2) {
@@ -264,6 +249,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 match transport.try_recv() {
                     Ok(TransportItem::Hello(new_node_id, peer_addr)) => {
                         log::debug!("received hello on node {} from node {}", node_id, new_node_id);
+
                         if let Some(progress) = self.raft_node.raft.prs().get(new_node_id) {
                             if progress.recent_active {
                                 log::warn!(
@@ -307,6 +293,21 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
                             }
                         } else {
+                            let conf_state = self.raft_node
+                                .get_store()
+                                .readable()
+                                .snapshot_metadata()
+                                .get_conf_state();
+                            if transport.send(TransportItem::Welcome(
+                                node_id, conf_state.nodes.clone(), conf_state.learners.clone()
+                            )).is_err() {
+                                log::error!(
+                                    "failed to send welcome to node {:?} from node {}",
+                                    transport.dest().ok(),
+                                    node_id,
+                                );
+                            }
+
                             let context = bincode::serialize(&peer_addr)
                                 .map_err(|e| NodeError::NodeAdd {
                                     node_id,
@@ -744,7 +745,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                     let id = self.proposal_id;
                                     self.proposal_id += 1;
                                     self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
-                                    let transport = self.new_transports.drain_filter(|t| {
+                                    let mut transport = self.new_transports.drain_filter(|t| {
                                         t.dest().unwrap() == address
                                     }).next().ok_or(NodeError::ConfChange {
                                         node_id,
@@ -754,6 +755,21 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                         )).compat()),
                                         backtrace: Backtrace::new(),
                                     })?;
+                                    let conf_state = self.raft_node
+                                        .get_store()
+                                        .readable()
+                                        .snapshot_metadata()
+                                        .get_conf_state();
+                                    if transport.send(TransportItem::Welcome(
+                                        node_id, conf_state.nodes.clone(), conf_state.learners.clone()
+                                    )).is_err() {
+                                        log::error!(
+                                            "failed to send welcome to node {:?} from node {}",
+                                            transport.dest().ok(),
+                                            node_id,
+                                        );
+                                    }
+
                                     self.transports.insert(new_node_id, transport);
                                 }
 
