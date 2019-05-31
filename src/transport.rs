@@ -62,4 +62,5 @@ pub trait Transport<M: MachineCore>: Send {
     fn try_recv(&mut self) -> Result<TransportItem<M, Self::Address>, TransportError>;
     fn src(&self) -> Result<Self::Address, AddressError>;
     fn dest(&self) -> Result<Self::Address, AddressError>;
+    fn close(self);
 }

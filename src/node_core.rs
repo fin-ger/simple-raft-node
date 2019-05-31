@@ -260,7 +260,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                     node_id,
                                     new_node_id,
                                 );
-                                self.new_transports.remove(i);
+                                self.new_transports.remove(i).close();
                             } else {
                                 log::info!(
                                     concat!(
@@ -354,7 +354,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     Ok(other) => {
                         log::warn!("new transport sent invalid message: {:?}", other);
                         log::warn!("disconnecting from misbehaving transport...");
-                        self.new_transports.remove(i);
+                        self.new_transports.remove(i).close();
                     },
                     Err(TransportError::Empty(_)) => {
                         i += 1;
@@ -365,7 +365,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             transport.dest().ok(),
                             node_id,
                         );
-                        self.new_transports.remove(i);
+                        self.new_transports.remove(i).close();
                         self.handle_disconnect()?;
                     }
                 }
@@ -455,7 +455,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         }
 
         for id in to_disconnect.drain(..) {
-            self.transports.remove(&id);
+            self.transports.remove(&id).map(|t| t.close());
             self.handle_disconnect()?;
         }
 
@@ -707,7 +707,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                         backtrace: Backtrace::new(),
                                     })?;
 
-                                self.transports.remove(&node_id);
+                                self.transports.remove(&node_id).close();
                                 let res = self.raft_node.raft.remove_node(node_id);
 
                                 let node_id = self.id;
@@ -735,7 +735,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                     }).next().ok_or(NodeError::ConfChange {
                                         node_id,
                                         cause: Box::new(failure::err_msg(format!(
-                                            "cannot add node {}  as transport is not available",
+                                            "cannot add node {} as transport is not available",
                                             new_node_id,
                                         )).compat()),
                                         backtrace: Backtrace::new(),

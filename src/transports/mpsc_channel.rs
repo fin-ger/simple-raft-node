@@ -154,4 +154,9 @@ impl<M: MachineCore> Transport<M> for MpscChannelTransport<M> {
     fn dest(&self) -> Result<u64, AddressError> {
         Ok(self.dest_id)
     }
+
+    fn close(self) {
+        drop(self.send);
+        drop(self.recv);
+    }
 }

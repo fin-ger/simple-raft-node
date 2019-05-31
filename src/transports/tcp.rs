@@ -164,4 +164,8 @@ impl<M: MachineCore> Transport<M> for TcpTransport<M> {
     fn dest(&self) -> Result<Self::Address, AddressError> {
         self.peer_addr.ok_or(AddressError::NotAvailable(Backtrace::new()))
     }
+
+    fn close(self) {
+        self.buffer.into_inner().shutdown(Shutdown::Both).unwrap();
+    }
 }
