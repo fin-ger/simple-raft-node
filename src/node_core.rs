@@ -707,7 +707,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                         backtrace: Backtrace::new(),
                                     })?;
 
-                                self.transports.remove(&node_id).close();
+                                self.transports.remove(&node_id).map(|t| t.close());
                                 let res = self.raft_node.raft.remove_node(node_id);
 
                                 let node_id = self.id;
