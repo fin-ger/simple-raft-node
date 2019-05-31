@@ -702,27 +702,29 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 self.transports.remove(&node_id).map(|t| t.close());
                                 let res = self.raft_node.raft.remove_node(node_id);
 
-                                // TODO: only do this as leader
-                                let node_id = self.id;
-                                if let NodeRemovalContext::AddNewNode {
-                                    node_id: new_node_id,
-                                    address
-                                } = ctx {
-                                    log::info!("adding new node {} to the raft", new_node_id);
-                                    let context = bincode::serialize(&address)
-                                        .map_err(|e| NodeError::NodeAdd {
-                                            node_id,
-                                            other_node: new_node_id,
-                                            cause: Box::new(e),
-                                            backtrace: Backtrace::new(),
-                                        })?;
-                                    let mut conf_change = ConfChange::new();
-                                    conf_change.set_node_id(new_node_id);
-                                    conf_change.set_change_type(ConfChangeType::AddNode);
-                                    conf_change.set_context(context);
-                                    let id = self.proposal_id;
-                                    self.proposal_id += 1;
-                                    self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
+                                if self.raft_node.raft.state == StateRole::Leader {
+                                    // if we are leader, add new node to raft
+                                    let node_id = self.id;
+                                    if let NodeRemovalContext::AddNewNode {
+                                        node_id: new_node_id,
+                                        address
+                                    } = ctx {
+                                        log::info!("adding new node {} to the raft", new_node_id);
+                                        let context = bincode::serialize(&address)
+                                            .map_err(|e| NodeError::NodeAdd {
+                                                node_id,
+                                                other_node: new_node_id,
+                                                cause: Box::new(e),
+                                                backtrace: Backtrace::new(),
+                                            })?;
+                                        let mut conf_change = ConfChange::new();
+                                        conf_change.set_node_id(new_node_id);
+                                        conf_change.set_change_type(ConfChangeType::AddNode);
+                                        conf_change.set_context(context);
+                                        let id = self.proposal_id;
+                                        self.proposal_id += 1;
+                                        self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
+                                    }
                                 }
 
                                 res
