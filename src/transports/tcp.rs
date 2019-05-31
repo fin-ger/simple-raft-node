@@ -166,6 +166,8 @@ impl<M: MachineCore> Transport<M> for TcpTransport<M> {
     }
 
     fn close(self) {
-        self.buffer.into_inner().shutdown(Shutdown::Both).unwrap();
+        // The only error that can occur during shutdown is a NotConnected error.
+        // When the TCP stream is already closed, this is fine for us -> ignore
+        let _ = self.buffer.into_inner().shutdown(Shutdown::Both);
     }
 }

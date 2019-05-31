@@ -295,25 +295,29 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             let id = self.proposal_id;
                             self.proposal_id += 1;
                             self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
-                            let mut transport = self.new_transports.remove(i);
-
-                            let conf_state = self.raft_node
-                                .get_store()
-                                .readable()
-                                .snapshot_metadata()
-                                .get_conf_state();
-                            if transport.send(TransportItem::Welcome(
-                                node_id, conf_state.nodes.clone(), conf_state.learners.clone()
-                            )).is_err() {
-                                log::error!(
-                                    "failed to send welcome to node {:?} from node {}",
-                                    transport.dest().ok(),
-                                    node_id,
-                                );
-                            }
-
-                            self.transports.insert(new_node_id, transport);
                         }
+
+                        let mut transport = self.new_transports.remove(i);
+
+                        let conf_state = self.raft_node
+                            .get_store()
+                            .readable()
+                            .snapshot_metadata()
+                            .get_conf_state();
+                        if transport.send(TransportItem::Welcome(
+                            node_id, conf_state.nodes.clone(), conf_state.learners.clone()
+                        )).is_err() {
+                            log::error!(
+                                "failed to send welcome to node {:?} from node {}",
+                                transport.dest().ok(),
+                                node_id,
+                            );
+                        }
+
+                        // close this transport as the connection will be reopened from the raft
+                        // to the new node when ConfChange::AddNode was successful with a new
+                        // welcome message from each node (containing no nodes or learners).
+                        transport.close();
                     },
                     Ok(TransportItem::Welcome(new_node_id, nodes, learners)) => {
                         log::debug!("received welcome on node {} from node {}", node_id, new_node_id);
@@ -698,6 +702,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 self.transports.remove(&node_id).map(|t| t.close());
                                 let res = self.raft_node.raft.remove_node(node_id);
 
+                                // TODO: only do this as leader
                                 let node_id = self.id;
                                 if let NodeRemovalContext::AddNewNode {
                                     node_id: new_node_id,
@@ -718,32 +723,6 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                     let id = self.proposal_id;
                                     self.proposal_id += 1;
                                     self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
-                                    let mut transport = self.new_transports.drain_filter(|t| {
-                                        t.dest().unwrap() == address
-                                    }).next().ok_or(NodeError::ConfChange {
-                                        node_id,
-                                        cause: Box::new(failure::err_msg(format!(
-                                            "cannot add node {} as transport is not available",
-                                            new_node_id,
-                                        )).compat()),
-                                        backtrace: Backtrace::new(),
-                                    })?;
-                                    let conf_state = self.raft_node
-                                        .get_store()
-                                        .readable()
-                                        .snapshot_metadata()
-                                        .get_conf_state();
-                                    if transport.send(TransportItem::Welcome(
-                                        node_id, conf_state.nodes.clone(), conf_state.learners.clone()
-                                    )).is_err() {
-                                        log::error!(
-                                            "failed to send welcome to node {:?} from node {}",
-                                            transport.dest().ok(),
-                                            node_id,
-                                        );
-                                    }
-
-                                    self.transports.insert(new_node_id, transport);
                                 }
 
                                 res
