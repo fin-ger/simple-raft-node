@@ -250,48 +250,36 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     Ok(TransportItem::Hello(new_node_id, peer_addr)) => {
                         log::debug!("received hello on node {} from node {}", node_id, new_node_id);
 
-                        if let Some(progress) = self.raft_node.raft.prs().get(new_node_id) {
-                            if progress.recent_active {
-                                log::warn!(
-                                    concat!(
-                                        "dropping incoming connection on node {} ",
-                                        "from new node {} as the node is already active",
-                                    ),
-                                    node_id,
-                                    new_node_id,
-                                );
-                                self.new_transports.remove(i).close();
-                            } else {
-                                log::info!(
-                                    concat!(
-                                        "removing existing node {} from the raft as a new node ",
-                                        "with the same id is about to join",
-                                    ),
-                                    new_node_id,
-                                );
-                                // remove existing node from cluster as the newly connected
-                                // node can be (although it has the same id) another physical
-                                // cluster node. Before we can add the new physical cluster node
-                                // to the raft, we have to safely remove the old node from the
-                                // cluster. In order to add the new node to the cluster after
-                                // successful removal, we have to carry a context containing all
-                                // needed information for adding the new node to the cluster.
-                                let context = bincode::serialize(&NodeRemovalContext::AddNewNode {
-                                    node_id: new_node_id,
-                                    address: peer_addr,
-                                }).map_err(|e| NodeError::ConfChange {
-                                    node_id,
-                                    cause: Box::new(e),
-                                    backtrace: Backtrace::new(),
-                                })?;
-                                let mut conf_change = ConfChange::new();
-                                conf_change.set_node_id(new_node_id);
-                                conf_change.set_change_type(ConfChangeType::RemoveNode);
-                                conf_change.set_context(context);
-                                let id = self.proposal_id;
-                                self.proposal_id += 1;
-                                self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
-                            }
+                        if self.raft_node.raft.prs().get(new_node_id).is_some() {
+                            log::info!(
+                                concat!(
+                                    "removing existing node {} from the raft as a new node ",
+                                    "with the same id is about to join",
+                                ),
+                                new_node_id,
+                            );
+                            // remove existing node from cluster as the newly connected
+                            // node can be (although it has the same id) another physical
+                            // cluster node. Before we can add the new physical cluster node
+                            // to the raft, we have to safely remove the old node from the
+                            // cluster. In order to add the new node to the cluster after
+                            // successful removal, we have to carry a context containing all
+                            // needed information for adding the new node to the cluster.
+                            let context = bincode::serialize(&NodeRemovalContext::AddNewNode {
+                                node_id: new_node_id,
+                                address: peer_addr,
+                            }).map_err(|e| NodeError::ConfChange {
+                                node_id,
+                                cause: Box::new(e),
+                                backtrace: Backtrace::new(),
+                            })?;
+                            let mut conf_change = ConfChange::new();
+                            conf_change.set_node_id(new_node_id);
+                            conf_change.set_change_type(ConfChangeType::RemoveNode);
+                            conf_change.set_context(context);
+                            let id = self.proposal_id;
+                            self.proposal_id += 1;
+                            self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
                         } else {
                             let context = bincode::serialize(&peer_addr)
                                 .map_err(|e| NodeError::NodeAdd {
