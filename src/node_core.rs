@@ -202,13 +202,23 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         Ok(proposals)
     }
 
-    fn handle_disconnect(&self) -> NodeResult<()> {
-        if self.transports.len() == 0 && self.new_transports.len() == 0 {
-            return Err(NodeError::AllTransportsClosed {
-                node_id: self.id(),
-                backtrace: Backtrace::new(),
-            });
-        }
+    fn handle_disconnect(&mut self, tp_id: u64) -> NodeResult<()> {
+        let node_id = self.id;
+        log::info!("removing node {} from raft on node {}", tp_id, node_id);
+        let context = bincode::serialize(
+            &NodeRemovalContext::<<C::Transport as Transport<M>>::Address>::None
+        ).map_err(|e| NodeError::ConfChange {
+            node_id,
+            cause: Box::new(e),
+            backtrace: Backtrace::new(),
+        })?;
+        let mut conf_change = ConfChange::new();
+        conf_change.set_node_id(tp_id);
+        conf_change.set_change_type(ConfChangeType::RemoveNode);
+        conf_change.set_context(context);
+        let id = self.proposal_id;
+        self.proposal_id += 1;
+        self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
 
         Ok(())
     }
@@ -226,7 +236,6 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         let mut answers = Vec::new();
 
         let node_id = self.id;
-
         'connection_manager: loop {
             if let Some(transport) = self.connection_manager.accept() {
                 log::debug!(
@@ -358,7 +367,6 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             node_id,
                         );
                         self.new_transports.remove(i).close();
-                        self.handle_disconnect()?;
                     }
                 }
 
@@ -393,21 +401,6 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             node_id,
                         );
                         to_disconnect.push(*tp_id);
-
-                        let context = bincode::serialize(
-                            &NodeRemovalContext::<<C::Transport as Transport<M>>::Address>::None
-                        ).map_err(|e| NodeError::ConfChange {
-                            node_id,
-                            cause: Box::new(e),
-                            backtrace: Backtrace::new(),
-                        })?;
-                        let mut conf_change = ConfChange::new();
-                        conf_change.set_node_id(*tp_id);
-                        conf_change.set_change_type(ConfChangeType::RemoveNode);
-                        conf_change.set_context(context);
-                        let id = self.proposal_id;
-                        self.proposal_id += 1;
-                        self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
                     },
                     Ok(TransportItem::Welcome(..)) => {
                         log::error!(
@@ -416,25 +409,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             node_id,
                         );
                         to_disconnect.push(*tp_id);
-
-                        let context = bincode::serialize(
-                            &NodeRemovalContext::<<C::Transport as Transport<M>>::Address>::None
-                        ).map_err(|e| NodeError::ConfChange {
-                            node_id,
-                            cause: Box::new(e),
-                            backtrace: Backtrace::new(),
-                        })?;
-                        let mut conf_change = ConfChange::new();
-                        conf_change.set_node_id(*tp_id);
-                        conf_change.set_change_type(ConfChangeType::RemoveNode);
-                        conf_change.set_context(context);
-                        let id = self.proposal_id;
-                        self.proposal_id += 1;
-                        self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
                     },
                     Err(TransportError::Empty(_)) => break,
                     Err(TransportError::Disconnected(_)) => {
-                        log::trace!("host for node {:?} is down!", transport.dest().ok());
+                        log::debug!("host for node {:?} is down!", transport.dest().ok());
                         to_disconnect.push(*tp_id);
                         break;
                     },
@@ -447,8 +425,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         }
 
         for id in to_disconnect.drain(..) {
-            self.transports.remove(&id).map(|t| t.close());
-            self.handle_disconnect()?;
+            self.handle_disconnect(id)?;
         }
 
         for answer in answers.drain(..) {
@@ -560,7 +537,12 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 None => {
                     // display the warning only after first leader election
                     if self.raft_node.raft.leader_id > 0 {
-                        log::warn!("Transport of leader not available, retrying on next tick...");
+                        log::error!("Transport of leader not available, retrying on next tick...");
+                        return Err(NodeError::LeaderNotReachable {
+                            node_id,
+                            leader_id: self.raft_node.raft.leader_id,
+                            backtrace: Backtrace::new(),
+                        });
                     }
                 },
             }
@@ -621,9 +603,11 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         // send out the messages from this node
         for msg in ready.messages.drain(..) {
             let to = msg.get_to();
-            if self.transports.get_mut(&to).unwrap().send(TransportItem::Message(msg)).is_err() {
-                log::warn!("send raft message to {} fail, let raft retry it", to);
-            }
+            self.transports.get_mut(&to).map(|t| {
+                if t.send(TransportItem::Message(msg)).is_err() {
+                    log::warn!("send raft message to {} fail, let raft retry it", to);
+                }
+            });
         }
 
         // apply all committed proposals
@@ -667,25 +651,34 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                         address,
                                         self.id,
                                     );
-                                    let mut transport = self.connection_manager.connect(&address)
-                                        .map_err(|e| NodeError::ConfChange {
-                                            node_id: self.id,
-                                            cause: Box::new(e),
-                                            backtrace: Backtrace::new(),
-                                        })?;
-                                    // we have to send another welcome that will essentially do
-                                    // nothing but move the transport from new_transports to the
-                                    // transports map on the remote end.
-                                    if transport.send(TransportItem::Welcome(
-                                        self.id, vec![], vec![]
-                                    )).is_err() {
-                                        log::error!(
-                                            "failed to send welcome to node {:?} from node {}",
-                                            transport.dest().ok(),
-                                            node_id,
-                                        );
-                                    }
-                                    self.transports.insert(node_id, transport);
+
+                                    // when connecting to the transport of the new node does not
+                                    // work, we ignore it and will handle the removal of the node
+                                    // during the next send or recv to this node.
+                                    let _ = self.connection_manager.connect(&address)
+                                        .map_err(|e| {
+                                            log::warn!(
+                                                "failed to connect to node {} on address {}: {}",
+                                                node_id,
+                                                address,
+                                                e,
+                                            );
+                                        })
+                                        .map(|mut transport| {
+                                            // we have to send another welcome that will essentially do
+                                            // nothing but move the transport from new_transports to the
+                                            // transports map on the remote end.
+                                            if transport.send(TransportItem::Welcome(
+                                                self.id, vec![], vec![]
+                                            )).is_err() {
+                                                log::error!(
+                                                    "failed to send welcome to node {:?} from node {}",
+                                                    transport.dest().ok(),
+                                                    node_id,
+                                                );
+                                            }
+                                            self.transports.insert(node_id, transport);
+                                        });
                                 }
                                 self.raft_node.raft.add_node(node_id)
                             },
@@ -699,7 +692,11 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                         backtrace: Backtrace::new(),
                                     })?;
 
-                                self.transports.remove(&node_id).map(|t| t.close());
+                                if self.raft_node.raft.leader_id == node_id {
+                                    log::warn!("ignoring transport removal of leader {}", node_id);
+                                } else {
+                                    self.transports.remove(&node_id).map(|t| t.close());
+                                }
                                 let res = self.raft_node.raft.remove_node(node_id);
 
                                 if self.raft_node.raft.state == StateRole::Leader {

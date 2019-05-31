@@ -132,6 +132,21 @@ impl<M: MachineCore> Transport<M> for TcpTransport<M> {
     fn try_recv(&mut self) -> Result<TransportItem<M, Self::Address>, TransportError> {
         log::trace!("trying to receive item on TCP transport {:?}", self.src());
 
+        match self.buffer.get_ref().take_error() {
+            Ok(err) => {
+                if err.is_some() {
+                    log::error!("TCP transport has error: {:?}", err);
+                    let _ = self.buffer.get_ref().shutdown(Shutdown::Both);
+                    return Err(TransportError::Disconnected(Backtrace::new()));
+                }
+            },
+            Err(err) => {
+                log::error!("failed to check TCP transport for errors: {}", err);
+                let _ = self.buffer.get_ref().shutdown(Shutdown::Both);
+                return Err(TransportError::Disconnected(Backtrace::new()));
+            }
+        }
+
         let item;
         let position = match self.buffer.fill_buf() {
             Ok(buf) => {

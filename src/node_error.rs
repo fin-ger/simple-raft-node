@@ -69,9 +69,10 @@ pub enum NodeError {
         cause: Box<Fail>,
         backtrace: Backtrace,
     },
-    #[fail(display = "The node {} has no active connections to the cluster", node_id)]
-    AllTransportsClosed {
+    #[fail(display = "The node {} cannot reach the leader {} of the cluster", node_id, leader_id)]
+    LeaderNotReachable {
         node_id: u64,
+        leader_id: u64,
         backtrace: Backtrace,
     },
 }
