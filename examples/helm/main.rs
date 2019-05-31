@@ -131,8 +131,9 @@ async fn main() {
         mgr,
     );
 
+    let stop = node.stop_handler();
     let is_running = Arc::new(Mutex::new(true));
-    let handle = {
+    {
         let is_running = is_running.clone();
         let machine = node.machine().clone();
         std::thread::spawn(move || {
@@ -154,8 +155,18 @@ async fn main() {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-        })
-    };
+        });
+    }
+
+    ctrlc::set_handler(move || {
+        stop();
+        *is_running.lock().unwrap() = false;
+        std::thread::sleep(Duration::from_secs(3));
+
+        // as rocket.rs is not capable of gracefully shutting down,
+        // we must stop it forcefully
+        std::process::exit(0);
+    }).expect("error setting Ctrl-C handler");
 
     rocket::ignite()
         .mount("/", routes![
@@ -164,6 +175,4 @@ async fn main() {
         .manage(node.machine().clone())
         .manage(node_id)
         .launch();
-
-    handle.join().expect("hash-map printer thread couldn't join");
 }

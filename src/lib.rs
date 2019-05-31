@@ -121,12 +121,21 @@ impl<M: Machine> Node<M> {
     pub fn id(&self) -> u64 {
         self.id
     }
+
+    pub fn stop_handler(&self) -> Box<Fn() + Send + Sync> {
+        let r = self.is_running.clone();
+        let id = self.id;
+
+        Box::new(move || {
+            log::info!("node {} is shutting down...", id);
+            *r.lock().unwrap() = false;
+        })
+    }
 }
 
 impl<M: Machine> Drop for Node<M> {
     fn drop(&mut self) {
-        log::info!("node {} is shutting down...", self.id);
-        *self.is_running.lock().unwrap() = false;
+        self.stop_handler()();
         self.handle.take().unwrap().join().unwrap();
     }
 }

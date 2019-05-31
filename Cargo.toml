@@ -20,4 +20,5 @@ get_if_addrs = "~0"
 env_logger = "~0"
 runtime = "0.3.0-alpha.4"
 rocket = "~0"
+ctrlc = { version = "~3", features = ["termination"] }
 futures-preview = "0.3.0-alpha.16"
