@@ -96,14 +96,14 @@ pub trait Storage: Default + Send + Sized {
     fn first_index(&self) -> u64 {
         match self.try_first_index() {
             Some(idx) => idx,
-            None => self.snapshot_metadata().get_index() + 1,
+            None => self.snapshot_metadata().index + 1,
         }
     }
 
     fn last_index(&self) -> u64 {
         match self.try_last_index() {
             Some(idx) => idx,
-            None => self.snapshot_metadata().get_index(),
+            None => self.snapshot_metadata().index,
         }
     }
 }
@@ -152,8 +152,8 @@ impl<T: Storage> raft::Storage for WrappedStorage<T> {
 
     fn term(&self, idx: u64) -> raft::Result<u64> {
         let metadata = self.storage.snapshot_metadata();
-        if idx == metadata.get_index() {
-            return Ok(metadata.get_term());
+        if idx == metadata.index {
+            return Ok(metadata.term);
         }
 
         if idx < self.storage.first_index() {
@@ -169,7 +169,7 @@ impl<T: Storage> raft::Storage for WrappedStorage<T> {
                             .unwrap()
                             .get(0)
                             .unwrap()
-                            .get_term()
+                            .term
                     );
                 }
             }

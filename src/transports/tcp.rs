@@ -16,7 +16,7 @@ use crate::{
 
 #[derive(Debug, Fail)]
 #[fail(display = "Failed to bind listener for TCP transport on {}", _0)]
-pub struct BindError(pub SocketAddr, #[cause] pub Box<Fail>, pub Backtrace);
+pub struct BindError(pub SocketAddr, #[cause] pub Box<dyn Fail>, pub Backtrace);
 
 pub struct TcpConnectionManager<M: MachineCore> {
     listener: TcpListener,

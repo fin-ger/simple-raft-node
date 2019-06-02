@@ -48,6 +48,7 @@ use failure::Fail;
 use crossbeam::channel;
 
 use node_core::NodeCore;
+use log;
 
 pub struct Node<M: Machine> {
     id: u64,
@@ -122,7 +123,7 @@ impl<M: Machine> Node<M> {
         self.id
     }
 
-    pub fn stop_handler(&self) -> Box<Fn() + Send + Sync> {
+    pub fn stop_handler(&self) -> Box<dyn Fn() + Send + Sync> {
         let r = self.is_running.clone();
         let id = self.id;
 

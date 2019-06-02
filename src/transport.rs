@@ -26,7 +26,7 @@ pub enum TransportError {
 
 #[derive(Debug, Fail)]
 #[fail(display = "Failed to establish a connection")]
-pub struct ConnectError(#[cause] pub Box<Fail>, pub Backtrace);
+pub struct ConnectError(#[cause] pub Box<dyn Fail>, pub Backtrace);
 
 #[derive(Debug, Fail)]
 pub enum AddressError {

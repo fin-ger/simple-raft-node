@@ -82,14 +82,14 @@ impl Storage for MemStorage {
         let metadata = snapshot.get_metadata();
         log::debug!("applying snapshot on memory storage...");
 
-        if self.first_index() > metadata.get_index() {
+        if self.first_index() > metadata.index {
             log::error!("snapshot is out-of-date and cannot be applied");
             return Err(SnapshotWriteError::OutOfDate(Backtrace::new()));
         }
 
         self.snapshot_metadata = metadata.clone();
-        self.hard_state.set_term(metadata.get_term());
-        self.hard_state.set_commit(metadata.get_index());
+        self.hard_state.set_term(metadata.term);
+        self.hard_state.set_commit(metadata.index);
         self.conf_state = metadata.get_conf_state().clone();
         self.snapshot = snapshot;
         self.entries.clear();
@@ -106,25 +106,25 @@ impl Storage for MemStorage {
 
         log::trace!("appending {} new entries to memory storage...", entries.len());
 
-        if self.first_index() > entries[0].get_index() {
+        if self.first_index() > entries[0].index {
             log::error!("cannot apply new entries as the indices are already compacted");
             return Err(EntryWriteError::AlreadyCompacted {
                 compacted_index: self.first_index() - 1,
-                entry_index: entries[0].get_index(),
+                entry_index: entries[0].index,
                 backtrace: Backtrace::new(),
             });
         }
 
-        if self.last_index() + 1 < entries[0].get_index() {
+        if self.last_index() + 1 < entries[0].index {
             log::error!("cannot apply new entries as the first index is not continuous");
             return Err(EntryWriteError::NotContinuous {
                 last_entry: self.last_index(),
-                entry_index: entries[0].get_index(),
+                entry_index: entries[0].index,
                 backtrace: Backtrace::new(),
             });
         }
 
-        let diff = entries[0].get_index() - self.first_index();
+        let diff = entries[0].index - self.first_index();
         self.entries.drain(diff as usize..);
         self.entries.extend_from_slice(&entries);
 
@@ -171,11 +171,11 @@ impl Storage for MemStorage {
 
     fn try_first_index(&self) -> Option<u64> {
         self.entries.first()
-            .map(|entry| entry.get_index())
+            .map(|entry| entry.index)
     }
 
     fn try_last_index(&self) -> Option<u64> {
         self.entries.last()
-            .map(|entry| entry.get_index())
+            .map(|entry| entry.index)
     }
 }

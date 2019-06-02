@@ -35,14 +35,14 @@ pub enum NodeError {
         node_id: u64,
         other_node: u64,
         #[cause]
-        cause: Box<Fail>,
+        cause: Box<dyn Fail>,
         backtrace: Backtrace,
     },
     #[fail(display = "A storage failure occurred on node {}", node_id)]
     Storage {
         node_id: u64,
         #[cause]
-        cause: Box<Fail>,
+        cause: Box<dyn Fail>,
         backtrace: Backtrace,
     },
     // NOTE: this error can be handled in NodeCore by retrying,
@@ -51,14 +51,14 @@ pub enum NodeError {
     ConfChange {
         node_id: u64,
         #[cause]
-        cause: Box<Fail>,
+        cause: Box<dyn Fail>,
         backtrace: Backtrace,
     },
     #[fail(display = "Failed to apply state change on node {}", node_id)]
     StateChange {
         node_id: u64,
         #[cause]
-        cause: Box<Fail>,
+        cause: Box<dyn Fail>,
         backtrace: Backtrace,
     },
     #[fail(display = "Failed to connect to gateway server at address {:?} on node {}", address, node_id)]
@@ -66,7 +66,7 @@ pub enum NodeError {
         node_id: u64,
         address: String,
         #[cause]
-        cause: Box<Fail>,
+        cause: Box<dyn Fail>,
         backtrace: Backtrace,
     },
     #[fail(display = "The node {} cannot reach the leader {} of the cluster", node_id, leader_id)]

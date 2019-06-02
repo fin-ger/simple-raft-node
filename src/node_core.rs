@@ -1,6 +1,5 @@
 use std::collections::{HashMap};
 use std::time::{Duration, Instant};
-use std::convert::TryInto;
 use std::task::Waker;
 use std::thread;
 
@@ -587,7 +586,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             log::trace!("applying pending snapshot");
             // apply the snapshot. It's necessary because in `RawNode::advance`
             // we stabilize the snapshot.
-            if *ready.snapshot() != Snapshot::new_() {
+            if *ready.snapshot() != Snapshot::new() {
                 let s = ready.snapshot().clone();
                 store.writable()
                     .set_snapshot(s)
@@ -602,7 +601,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         log::trace!("sending pending messages to other nodes");
         // send out the messages from this node
         for msg in ready.messages.drain(..) {
-            let to = msg.get_to();
+            let to = msg.to;
             self.transports.get_mut(&to).map(|t| {
                 if t.send(TransportItem::Message(msg)).is_err() {
                     log::warn!("send raft message to {} fail, let raft retry it", to);
@@ -613,7 +612,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         // apply all committed proposals
         if let Some(committed_entries) = ready.committed_entries.take() {
             for entry in &committed_entries {
-                if entry.get_data().is_empty() {
+                if entry.data.is_empty() {
                     log::debug!("received commit from new elected leader on node {}", self.id);
                     // from new elected leaders.
                     continue;
@@ -623,20 +622,20 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         log::debug!("received conf-change on node {}", self.id);
                         // apply configuration changes
                         let mut cc = ConfChange::new();
-                        cc.merge_from_bytes(entry.get_data())
+                        cc.merge_from_bytes(&entry.data)
                             .map_err(|e| NodeError::ConfChange {
                                 node_id,
                                 cause: Box::new(e),
                                 backtrace: Backtrace::new(),
                             })?;
 
-                        let node_id = cc.get_node_id();
+                        let node_id = cc.node_id;
                         match cc.get_change_type() {
                             ConfChangeType::AddNode => {
                                 if node_id != self.id {
                                     log::debug!("conf-change adds node {} to raft", node_id);
                                     let address: <C::Transport as Transport<M>>::Address =
-                                        bincode::deserialize(cc.get_context())
+                                        bincode::deserialize(&cc.context)
                                         .map_err(|e| NodeError::ConfChange {
                                             node_id: self.id,
                                             cause: Box::new(e),
@@ -658,9 +657,10 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                     let _ = self.connection_manager.connect(&address)
                                         .map_err(|e| {
                                             log::warn!(
-                                                "failed to connect to node {} on address {}: {}",
+                                                "failed to connect to node {} at address {} on node {}: {}",
                                                 node_id,
                                                 address,
+                                                self.id,
                                                 e,
                                             );
                                         })
@@ -685,7 +685,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             ConfChangeType::RemoveNode => {
                                 log::debug!("conf-change removes node {} from raft", node_id);
                                 let ctx: NodeRemovalContext<<C::Transport as Transport<M>>::Address> =
-                                    bincode::deserialize(cc.get_context())
+                                    bincode::deserialize(&cc.context)
                                     .map_err(|e| NodeError::ConfChange {
                                         node_id: self.id,
                                         cause: Box::new(e),
@@ -762,7 +762,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     EntryType::EntryNormal => {
                         log::debug!("received state-change entry on node {}", self.id);
                         // for state change proposals, tell the machine to change its state.
-                        let state_change = bincode::deserialize(entry.get_data())
+                        let state_change = bincode::deserialize(&entry.data)
                             .map_err(|e| NodeError::StateChange {
                                 node_id,
                                 cause: Box::new(e),
@@ -773,7 +773,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 }
 
                 // check if the proposal had a context attached to it
-                let Context { node_id, proposal_id } = match entry.get_context().try_into() {
+                let Context { node_id, proposal_id } = match bincode::deserialize(&entry.context) {
                     Ok(context) => context,
                     Err(_) => continue,
                 };
@@ -802,8 +802,8 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     .writable();
 
                 store.set_hard_state(HardState {
-                    commit: last_committed.get_index(),
-                    term: last_committed.get_term(),
+                    commit: last_committed.index,
+                    term: last_committed.term,
                     ..store.hard_state().clone()
                 }).map_err(|e| NodeError::Storage {
                     node_id,
