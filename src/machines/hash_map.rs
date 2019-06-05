@@ -4,6 +4,7 @@ use failure::Backtrace;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::{
+    utils,
     machine,
     Machine,
     MachineCore,
@@ -197,12 +198,12 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
 
     // TODO: replace this with serde traits
     fn deserialize(&mut self, data: Vec<u8>) -> Result<(), MachineCoreError> {
-        *self = bincode::deserialize(&data[..]).map_err(|_| MachineCoreError::Deserialization)?;
+        *self = utils::deserialize(&data[..]).map_err(|_| MachineCoreError::Deserialization)?;
         Ok(())
     }
 
     fn serialize(&self) -> Result<Vec<u8>, MachineCoreError> {
-        bincode::serialize(self).map_err(|_| MachineCoreError::Serialization)
+        utils::serialize(self).map_err(|_| MachineCoreError::Serialization)
     }
 
     fn apply(&mut self, state_change: HashMapStateChange<K, V>) {

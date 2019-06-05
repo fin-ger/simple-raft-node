@@ -17,6 +17,7 @@ use raft::eraftpb::{
 };
 
 use crate::{
+    utils,
     TransportItem,
     Transport,
     TransportError,
@@ -204,7 +205,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
     fn handle_disconnect(&mut self, tp_id: u64) -> NodeResult<()> {
         let node_id = self.id;
         log::info!("removing node {} from raft on node {}", tp_id, node_id);
-        let context = bincode::serialize(
+        let context = utils::serialize(
             &NodeRemovalContext::<<C::Transport as Transport<M>>::Address>::None
         ).map_err(|e| NodeError::ConfChange {
             node_id,
@@ -273,7 +274,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             // cluster. In order to add the new node to the cluster after
                             // successful removal, we have to carry a context containing all
                             // needed information for adding the new node to the cluster.
-                            let context = bincode::serialize(&NodeRemovalContext::AddNewNode {
+                            let context = utils::serialize(&NodeRemovalContext::AddNewNode {
                                 node_id: new_node_id,
                                 address: peer_addr,
                             }).map_err(|e| NodeError::ConfChange {
@@ -289,7 +290,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             self.proposal_id += 1;
                             self.proposals.push(Proposal::conf_change(id, node_id, conf_change));
                         } else {
-                            let context = bincode::serialize(&peer_addr)
+                            let context = utils::serialize(&peer_addr)
                                 .map_err(|e| NodeError::NodeAdd {
                                     node_id,
                                     other_node: new_node_id,
@@ -635,7 +636,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 if node_id != self.id {
                                     log::debug!("conf-change adds node {} to raft", node_id);
                                     let address: <C::Transport as Transport<M>>::Address =
-                                        bincode::deserialize(&cc.context)
+                                        utils::deserialize(&cc.context)
                                         .map_err(|e| NodeError::ConfChange {
                                             node_id: self.id,
                                             cause: Box::new(e),
@@ -685,7 +686,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             ConfChangeType::RemoveNode => {
                                 log::debug!("conf-change removes node {} from raft", node_id);
                                 let ctx: NodeRemovalContext<<C::Transport as Transport<M>>::Address> =
-                                    bincode::deserialize(&cc.context)
+                                    utils::deserialize(&cc.context)
                                     .map_err(|e| NodeError::ConfChange {
                                         node_id: self.id,
                                         cause: Box::new(e),
@@ -707,7 +708,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                         address
                                     } = ctx {
                                         log::info!("adding new node {} to the raft", new_node_id);
-                                        let context = bincode::serialize(&address)
+                                        let context = utils::serialize(&address)
                                             .map_err(|e| NodeError::NodeAdd {
                                                 node_id,
                                                 other_node: new_node_id,
@@ -762,7 +763,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                     EntryType::EntryNormal => {
                         log::debug!("received state-change entry on node {}: {:?}", self.id, entry.data);
                         // for state change proposals, tell the machine to change its state.
-                        let state_change = bincode::deserialize(&entry.data)
+                        let state_change = utils::deserialize(&entry.data)
                             .map_err(|e| NodeError::StateChange {
                                 node_id,
                                 cause: Box::new(e),
@@ -773,7 +774,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                 }
 
                 // check if the proposal had a context attached to it
-                let Context { node_id, proposal_id } = match bincode::deserialize(&entry.context) {
+                let Context { node_id, proposal_id } = match utils::deserialize(&entry.context) {
                     Ok(context) => context,
                     Err(_) => continue,
                 };

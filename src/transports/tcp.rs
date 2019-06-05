@@ -5,6 +5,7 @@ use failure::{Fail, Backtrace};
 use get_if_addrs::get_if_addrs;
 
 use crate::{
+    utils,
     Transport,
     TransportItem,
     TransportError,
@@ -116,7 +117,7 @@ impl<M: MachineCore> Transport<M> for TcpTransport<M> {
 
     fn send(&mut self, item: TransportItem<M, Self::Address>) -> Result<(), TransportError> {
         log::trace!("sending item {:?} over TCP transport", item);
-        let data = bincode::serialize(&item).map_err(|e| {
+        let data = utils::serialize(&item).map_err(|e| {
             log::error!("failed to serialize transport item: {}", e);
             let _ = self.buffer.get_ref().shutdown(Shutdown::Both);
             TransportError::Disconnected(Backtrace::new())
@@ -151,7 +152,7 @@ impl<M: MachineCore> Transport<M> for TcpTransport<M> {
         let position = match self.buffer.fill_buf() {
             Ok(buf) => {
                 let mut cur = Cursor::new(buf);
-                item = match bincode::deserialize_from(&mut cur) {
+                item = match utils::deserialize_from(&mut cur) {
                     Ok(item) => item,
                     Err(_) => return Err(TransportError::Empty(Backtrace::new())),
                 };

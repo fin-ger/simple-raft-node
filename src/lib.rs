@@ -27,6 +27,7 @@ mod serde_polyfill;
 mod machine;
 mod transport;
 mod storage;
+mod utils;
 
 pub mod machines;
 pub mod transports;

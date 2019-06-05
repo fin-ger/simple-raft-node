@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use raft::{eraftpb::ConfChange, RawNode};
 
 use crate::serde_polyfill::ConfChangePolyfill;
+use crate::utils::{self, SerdeError};
 use crate::MachineCore;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,18 +42,18 @@ pub enum NodeRemovalContext<A> {
 }
 
 impl TryInto<Vec<u8>> for Context {
-    type Error = bincode::Error;
+    type Error = SerdeError;
 
     fn try_into(self) -> Result<Vec<u8>, Self::Error> {
-        bincode::serialize(&self)
+        utils::serialize(&self)
     }
 }
 
 impl TryFrom<&[u8]> for Context {
-    type Error = bincode::Error;
+    type Error = SerdeError;
 
     fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
-        bincode::deserialize(&data)
+        utils::deserialize(&data)
     }
 }
 
@@ -138,7 +139,7 @@ impl<M: MachineCore> Proposal<M> {
         let last_index1 = raft_group.raft.raft_log.last_index();
         match self.kind {
             ProposalKind::StateChange(ref change) => {
-                let data = match bincode::serialize(change) {
+                let data = match utils::serialize(change) {
                     Ok(data) => data,
                     Err(err) => {
                         log::error!("Failed to serialize state-change of proposal: {}", err);
