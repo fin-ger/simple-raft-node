@@ -760,7 +760,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             })?;
                     },
                     EntryType::EntryNormal => {
-                        log::debug!("received state-change entry on node {}", self.id);
+                        log::debug!("received state-change entry on node {}: {:?}", self.id, entry.data);
                         // for state change proposals, tell the machine to change its state.
                         let state_change = bincode::deserialize(&entry.data)
                             .map_err(|e| NodeError::StateChange {
