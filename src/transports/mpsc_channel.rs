@@ -27,32 +27,6 @@ impl<M: MachineCore> MpscChannelConnectionManager<M> {
             .map(|i| (*i, Vec::new()))
             .collect();
         let transports = Arc::new(Mutex::new(map));
-        let mut map = transports.lock().unwrap();
-
-        for src_id in &node_ids {
-            for dest_id in node_ids.iter().skip(*src_id as usize) {
-                if src_id != dest_id {
-                    let src_channel = mpsc::channel();
-                    let dest_channel = mpsc::channel();
-
-                    map.get_mut(src_id).unwrap().push(MpscChannelTransport {
-                        src_id: *src_id,
-                        dest_id: *dest_id,
-                        send: dest_channel.0,
-                        recv: src_channel.1,
-                        transports: transports.clone(),
-                    });
-                    map.get_mut(dest_id).unwrap().push(MpscChannelTransport {
-                        src_id: *dest_id,
-                        dest_id: *src_id,
-                        send: src_channel.0,
-                        recv: dest_channel.1,
-                        transports: transports.clone(),
-                    });
-                }
-            }
-        }
-
         node_ids.iter()
             .map(|id| Self {
                 transports: transports.clone(),
@@ -112,20 +86,26 @@ impl<M: MachineCore> ConnectionManager<M> for MpscChannelConnectionManager<M> {
         address: &<Self::Transport as Transport<M>>::Address,
     ) -> Result<MpscChannelTransport<M>, ConnectError> {
         log::debug!("attempting to connect from {} to {}", self.node_id, address);
-        self.transports.lock().unwrap()
-            .get_mut(&self.node_id).unwrap()
-            .drain_filter(|t| {
-                log::debug!("found connection from {} to {}", self.node_id, t.dest().unwrap());
-                t.dest().unwrap() == *address
-            })
-            .next()
-            .ok_or(ConnectError(
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionRefused,
-                    "connection not available",
-                )),
-                Backtrace::new(),
-            ))
+
+        let src_id = self.node_id;
+        let dest_id = *address;
+
+        let src_channel = mpsc::channel();
+        let dest_channel = mpsc::channel();
+
+        self.transports.lock().unwrap().get_mut(&dest_id).unwrap().push(MpscChannelTransport {
+            src_id: dest_id,
+            dest_id: src_id,
+            send: src_channel.0,
+            recv: dest_channel.1,
+        });
+
+        Ok(MpscChannelTransport {
+            src_id: src_id,
+            dest_id: dest_id,
+            send: dest_channel.0,
+            recv: src_channel.1,
+        })
     }
 }
 
@@ -134,7 +114,6 @@ pub struct MpscChannelTransport<M: MachineCore> {
     dest_id: u64,
     send: Sender<TransportItem<M, u64>>,
     recv: Receiver<TransportItem<M, u64>>,
-    transports: Arc<Mutex<HashMap<u64, Vec<MpscChannelTransport<M>>>>>,
 }
 
 impl<M: MachineCore> Transport<M> for MpscChannelTransport<M> {
@@ -163,9 +142,9 @@ impl<M: MachineCore> Transport<M> for MpscChannelTransport<M> {
     }
 
     fn close(self) {
-        log::debug!("storing transport from {} to {} in transports", self.src_id, self.dest_id);
-        let arc = self.transports.clone();
-        let mut transports = arc.lock().unwrap();
-        transports.get_mut(&self.src_id).unwrap().push(self);
+        //log::debug!("storing transport from {} to {} in transports", self.src_id, self.dest_id);
+        //let arc = self.transports.clone();
+        //let mut transports = arc.lock().unwrap();
+        //transports.get_mut(&self.src_id).unwrap().push(self);
     }
 }

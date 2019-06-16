@@ -5,5 +5,4 @@
 replicaCount: 5
 
 service:
-  type: ClusterIP
   port: 80

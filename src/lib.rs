@@ -102,7 +102,6 @@ impl<M: Machine> Node<M> {
                             err,
                             err.backtrace().unwrap(),
                         );
-                        break;
                     },
                 };
             }
