@@ -1,6 +1,17 @@
 use failure::{Fail, Backtrace};
 use crate::TransportError;
 
+/* Hello again, dear reader!
+ *
+ * This file contains the definition for all errors that can occur during the
+ * operation of a `Node`. Technically, it would be ideal to have no error
+ * wrapping in here, as the error itself should be descriptive to the failure.
+ * However, it is unnecessary noise during prototyping of an application to
+ * adjust the error types with every minor change in the `advance` algorithm
+ * of the `Node`. This is why errors like `Raft` are not descriptive. For a
+ * stable API, this must be fixed.
+ */
+
 #[derive(Debug, Fail)]
 pub enum NodeError {
     #[fail(display = "A raft operation failed on node {}", node_id)]

@@ -40,6 +40,71 @@ use crate::{
     ConnectionManager,
 };
 
+/* Here we go again! Welcome to the heart of this project!
+ *
+ * Where should we even start? I apologize for the mess of this code :(
+ *
+ * Let's get our hands dirty and dig right into the "advance" method!
+ *
+ * Each advance starts with getting the current time. This is to keep track
+ * of the time the current advance is already taking. When it takes too long,
+ * some operations will get left behind and queued for the next advance. This
+ * is to make sure a node stays responsive even during high workloads.
+ *
+ * Next, the connection manager is checked for incoming connections. If there
+ * are new connections, the new connection will be stored in `new_transports`
+ * until a `Hello` message is send from the other side. When a `Hello` is received,
+ * we will try to introduce our new friend to the cluster. If our friend likes our welcoming
+ * he will become part of the cluster and starts receiving log replicas from the leader.
+ * In the rare occasion, we encounter a friend who claims to be someone who has already
+ * joined the cluster, we trust him blindly (this is ok, as the administrator must have
+ * control over the network) and will remove the "old" version of our friend from the cluster
+ * and after that introduce our friend as a new member.
+ *
+ * In the case that the new connection sends a Welcome message, it means that someone from
+ * the cluster asks us kindly to join him. We are always up for a good cluster, so we
+ * take all the nodes and learners our new host has to offer and go full in!
+ *
+ * When an unknown message or an error is received from a new connection, we will drop it.
+ * Our fellow seems to be disrespectful to us and does not even say hello! So let's shut
+ * the door!
+ *
+ * Next, we will check all established connections for new data. When raft messages are
+ * received from the stream they get processed directly by stepping the raft.
+ * During operation of a raft, a timer is running which triggers a tick on the raft
+ * every 100ms.
+ * When new proposals arrived, they get checked for read operations after ticking the
+ * raft. Read operations are processed directly and will not be forwarded to other
+ * machines.
+ * If we are the leader, we will continue processing the proposals by applying them
+ * on the machine and raft. When the operation is finished, we will deliver the
+ * answer.
+ * If we are not that lucky and are restrained by the laws of society, we have to
+ * kindly ask our leader to consider applying our proposal by forwarding it over
+ * the network.
+ *
+ * When finished dealing with all the proposals, we start to process the raft.
+ * First, we check whether our raft is ready to float and all logs have been
+ * installed. When there are unapplied entries, we append them to the log as well
+ * as applying new snapshots.
+ * Next, we will check for any messages that need to be send. If there are some,
+ * we will send them to the provided member.
+ * Last, we will check for any entries that got committed and need to be applied
+ * to the state machine. Entries can be of two types: state changes and configuration
+ * changes. When a configuration change occurs, this most likely means that the
+ * set of members changed in the cluster. When a member gets added to the raft,
+ * we will try to welcome it in the cluster. When a node gets removed from the raft
+ * we will cleanup state related to that node.
+ * When the entry is a state change, we will just apply it to the underlying state
+ * machine. After the entries have been processed, we send the results as an answer
+ * to the machines which started the proposal.
+ *
+ * When finished processing the raft, we will check for the timer we previously set
+ * and wait the remaining time until the whole cycle reached 10ms.
+ *
+ * After that, the cycle starts at the beginning.
+ */
+
 pub struct NodeCore<M: MachineCore, C: ConnectionManager<M>, S: Storage> {
     id: u64,
     raft_node: RawNode<WrappedStorage<S>>,
