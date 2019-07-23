@@ -14,6 +14,7 @@ pub enum TransportItem<M: MachineCore, A: Address> {
     Message(#[serde(with = "MessagePolyfill")] Message),
     Hello(u64, A),
     Welcome(u64, Vec<u64>, Vec<u64>),
+    Broadcast(Vec<u8>),
 }
 
 #[derive(Debug, Fail)]

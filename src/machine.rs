@@ -56,6 +56,16 @@ pub async fn retrieve<M: MachineCore>(
     ))
 }
 
+pub async fn broadcast<M: MachineCore>(
+    request_manager: &RequestManager<M>,
+    data: Vec<u8>,
+) -> RequestResult<()> {
+    await!(request_manager.request(
+        RequestKind::Broadcast(data),
+        |_| Ok(()),
+    ))
+}
+
 pub trait MachineItem = std::fmt::Debug + Clone + Send + Unpin;
 
 // the core has to own all its data
@@ -71,4 +81,7 @@ pub trait MachineCore: std::fmt::Debug + Clone + Send +'static {
         &self,
         state_identifier: Self::StateIdentifier,
     ) -> Result<Self::StateValue, RequestError>;
+    fn broadcast(&self, _data: Vec<u8>) {
+        // default to ignore
+    }
 }

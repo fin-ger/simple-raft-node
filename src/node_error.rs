@@ -72,6 +72,13 @@ pub enum NodeError {
         cause: Box<dyn Fail>,
         backtrace: Backtrace,
     },
+    #[fail(display = "Failed to broadcast message on node {}", node_id)]
+    Broadcast {
+        node_id: u64,
+        #[cause]
+        cause: TransportError,
+        backtrace: Backtrace,
+    },
     #[fail(display = "Failed to connect to gateway server at address {:?} on node {}", address, node_id)]
     GatewayConnect {
         node_id: u64,

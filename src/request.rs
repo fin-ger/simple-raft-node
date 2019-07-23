@@ -25,6 +25,7 @@ pub type RequestResult<T> = Result<T, RequestError>;
 pub enum RequestKind<M: MachineCore> {
     StateChange(M::StateChange),
     StateRetrieval(M::StateIdentifier),
+    Broadcast(Vec<u8>),
 }
 
 #[derive(Debug)]

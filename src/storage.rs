@@ -186,9 +186,15 @@ impl<T: Storage> raft::Storage for WrappedStorage<T> {
         Ok(self.storage.last_index())
     }
 
-    fn snapshot(&self) -> raft::Result<Snapshot> {
+    fn snapshot(&self, request_index: u64) -> raft::Result<Snapshot> {
         match self.storage.snapshot() {
-            Ok(snapshot) => Ok(snapshot),
+            Ok(snapshot) => {
+                if snapshot.get_metadata().index < request_index {
+                    Err(raft::StorageError::SnapshotTemporarilyUnavailable.into())
+                } else {
+                    Ok(snapshot)
+                }
+            },
             Err(SnapshotReadError::SnapshotTemporarilyUnavailable(_)) => Err(
                 raft::StorageError::SnapshotTemporarilyUnavailable.into()
             ),

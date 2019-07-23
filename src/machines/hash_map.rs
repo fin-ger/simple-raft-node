@@ -171,6 +171,17 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
 
         Err(RequestError::NotInitialized(Backtrace::new()))
     }
+
+    pub async fn broadcast(&self, data: Vec<u8>) -> RequestResult<()> {
+        if let Some(ref mngr) = self.mngr {
+            log::trace!("broadcasting on machine...");
+            return await!(machine::broadcast(mngr, data));
+        }
+
+        log::error!("machine was not initialized while broadcast was issued");
+
+        Err(RequestError::NotInitialized(Backtrace::new()))
+    }
 }
 
 impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOwned>

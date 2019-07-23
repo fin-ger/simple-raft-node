@@ -223,6 +223,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
     }
 
     fn get_proposals_from_requests(&mut self, timeout: &Instant) -> NodeResult<Vec<Proposal<M>>> {
+        // TODO: handle new broadcasts here
         let mut proposals = Vec::new();
         loop {
             let node_id = self.raft_node.raft.id;
@@ -257,6 +258,16 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         })?;
                     request.waker.wake();
                 },
+                RequestKind::Broadcast(data) => {
+                    for transport in self.transports.values_mut() {
+                        transport.send(TransportItem::Broadcast(data.clone()))
+                            .map_err(|e| NodeError::Broadcast {
+                                node_id: node_id,
+                                cause: e,
+                                backtrace: Backtrace::new(),
+                            })?;
+                    }
+                }
             }
 
             if timeout.elapsed() >= Duration::from_millis(10) {
@@ -474,6 +485,9 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             node_id,
                         );
                         to_disconnect.push(*tp_id);
+                    },
+                    Ok(TransportItem::Broadcast(data)) => {
+                        self.machine.broadcast(data);
                     },
                     Err(TransportError::Empty(_)) => break,
                     Err(TransportError::Disconnected(_)) => {
