@@ -40,6 +40,7 @@ pub enum Response<M: MachineCore> {
     StateChange(GeneralResult),
     StateRetrieval(StateRetrievalResult<M>),
     ConfChange(GeneralResult),
+    Broadcasted,
 }
 
 #[derive(Debug)]
