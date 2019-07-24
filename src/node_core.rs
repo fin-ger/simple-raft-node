@@ -267,12 +267,6 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                                 backtrace: Backtrace::new(),
                             })?;
                     }
-                    request.response_tx.send(Response::Broadcasted)
-                        .map_err(|_| NodeError::AnswerDelivery {
-                            node_id: self.id,
-                            backtrace: Backtrace::new(),
-                        })?;
-                    request.waker.wake();
                 }
             }
 

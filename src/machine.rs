@@ -56,14 +56,16 @@ pub async fn retrieve<M: MachineCore>(
     ))
 }
 
-pub async fn broadcast<M: MachineCore>(
+pub fn broadcast<M: MachineCore>(
     request_manager: &RequestManager<M>,
     data: Vec<u8>,
 ) -> RequestResult<()> {
-    await!(request_manager.request(
+    let _handle = runtime::spawn(request_manager.request(
         RequestKind::Broadcast(data),
         |_| Ok(()),
-    ))
+    ));
+
+    Ok(())
 }
 
 pub trait MachineItem = std::fmt::Debug + Clone + Send + Unpin;

@@ -175,7 +175,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
     pub async fn broadcast(&self, data: Vec<u8>) -> RequestResult<()> {
         if let Some(ref mngr) = self.mngr {
             log::trace!("broadcasting on machine...");
-            return await!(machine::broadcast(mngr, data));
+            return machine::broadcast(mngr, data);
         }
 
         log::error!("machine was not initialized while broadcast was issued");
