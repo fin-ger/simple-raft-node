@@ -119,7 +119,6 @@ pub struct NodeCore<M: MachineCore, C: ConnectionManager<M>, S: Storage> {
     response_txs: HashMap<u64, Sender<Response<M>>>,
     response_wakers: HashMap<u64, Waker>,
     machine: M,
-    wait_time: Duration,
 }
 
 impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
@@ -187,7 +186,6 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             response_txs: Default::default(),
             response_wakers: Default::default(),
             machine,
-            wait_time: Duration::from_secs(0),
         })
     }
 
@@ -225,12 +223,13 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
     }
 
     fn get_proposals_from_requests(&mut self, timeout: &Instant) -> NodeResult<Vec<Proposal<M>>> {
+        // TODO: handle new broadcasts here
         let mut proposals = Vec::new();
         loop {
             let node_id = self.raft_node.raft.id;
 
             // receive new requests from the user
-            let request = match self.request_rx.recv_timeout(self.wait_time) {
+            let request = match self.request_rx.try_recv() {
                 Ok(request) => request,
                 Err(_) => break,
             };
@@ -632,7 +631,8 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         self.on_ready()?;
 
         if let Some(duration) = Duration::from_millis(10).checked_sub(timeout.elapsed()) {
-            self.wait_time = duration;
+            log::trace!("node {} is awaiting rest of cycle time", self.id);
+            thread::sleep(duration);
         }
 
         Ok(())
