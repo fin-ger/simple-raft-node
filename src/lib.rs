@@ -4,7 +4,6 @@
     trait_alias,
     fn_traits,
     async_await,
-    await_macro,
 )]
 
 /* Hello, dear reader of this source code.

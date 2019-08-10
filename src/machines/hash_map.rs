@@ -78,7 +78,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
     pub async fn put(&self, key: K, value: V) -> RequestResult<()> {
         if let Some(ref mngr) = self.mngr {
             log::trace!("applying put({:?}, {:?}) to machine...", key, value);
-            return await!(machine::apply(mngr, HashMapStateChange::Put(key, value)));
+            return machine::apply(mngr, HashMapStateChange::Put(key, value)).await;
         }
 
         log::error!("machine was not initialized while put({:?}, {:?}) was requested", key, value);
@@ -89,7 +89,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
     pub async fn delete(&self, key: K) -> RequestResult<()> {
         if let Some(ref mngr) = self.mngr {
             log::trace!("applying delete({:?}) to machine...", key);
-            return await!(machine::apply(mngr, HashMapStateChange::Delete(key)));
+            return machine::apply(mngr, HashMapStateChange::Delete(key)).await;
         }
 
         log::error!("machine was not initialized while delete({:?}) was requested", key);
@@ -100,7 +100,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
     pub async fn get(&self, key: K) -> RequestResult<V> {
         if let Some(ref mngr) = self.mngr {
             log::trace!("retrieving get({:?}) on machine...", key);
-            return await!(machine::retrieve(mngr, HashMapStateIdentifier::Value(key)))
+            return machine::retrieve(mngr, HashMapStateIdentifier::Value(key)).await
                 .and_then(|res| match res {
                     HashMapStateValue::Value(v) => Ok(v),
                     _ => Err(RequestError::StateRetrieval(Backtrace::new())),
@@ -115,7 +115,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
     pub async fn keys(&self) -> RequestResult<Vec<K>> {
         if let Some(ref mngr) = self.mngr {
             log::trace!("retrieving keys() on machine...");
-            return await!(machine::retrieve(mngr, HashMapStateIdentifier::Keys))
+            return machine::retrieve(mngr, HashMapStateIdentifier::Keys).await
                 .and_then(|res| match res {
                     HashMapStateValue::Keys(keys) => Ok(keys),
                     _ => Err(RequestError::StateRetrieval(Backtrace::new())),
@@ -130,7 +130,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
     pub async fn values(&self) -> RequestResult<Vec<V>> {
         if let Some(ref mngr) = self.mngr {
             log::trace!("retrieving values() on machine...");
-            return await!(machine::retrieve(mngr, HashMapStateIdentifier::Values))
+            return machine::retrieve(mngr, HashMapStateIdentifier::Values).await
                 .and_then(|res| match res {
                     HashMapStateValue::Values(values) => Ok(values),
                     _ => Err(RequestError::StateRetrieval(Backtrace::new())),
@@ -145,7 +145,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
     pub async fn entries(&self) -> RequestResult<Vec<(K, V)>> {
         if let Some(ref mngr) = self.mngr {
             log::trace!("retrieving entries() on machine...");
-            return await!(machine::retrieve(mngr, HashMapStateIdentifier::Entries))
+            return machine::retrieve(mngr, HashMapStateIdentifier::Entries).await
                 .and_then(|res| match res {
                     HashMapStateValue::Entries(entries) => Ok(entries),
                     _ => Err(RequestError::StateRetrieval(Backtrace::new())),
@@ -160,7 +160,7 @@ impl<K: Key + Serialize + DeserializeOwned, V: Value + Serialize + DeserializeOw
     pub async fn size(&self) -> RequestResult<usize> {
         if let Some(ref mngr) = self.mngr {
             log::trace!("retrieving size() on machine...");
-            return await!(machine::retrieve(mngr, HashMapStateIdentifier::Size))
+            return machine::retrieve(mngr, HashMapStateIdentifier::Size).await
                 .and_then(|res| match res {
                     HashMapStateValue::Size(size) => Ok(size),
                     _ => Err(RequestError::StateRetrieval(Backtrace::new())),

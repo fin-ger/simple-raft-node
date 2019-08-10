@@ -30,7 +30,7 @@ pub async fn apply<M: MachineCore>(
     request_manager: &RequestManager<M>,
     state_change: M::StateChange,
 ) -> RequestResult<()> {
-    await!(request_manager.request(
+    request_manager.request(
         RequestKind::StateChange(state_change),
         |result| {
             match result {
@@ -38,14 +38,14 @@ pub async fn apply<M: MachineCore>(
                 _ => Err(RequestError::StateChange(Backtrace::new())),
             }
         },
-    ))
+    ).await
 }
 
 pub async fn retrieve<M: MachineCore>(
     request_manager: &RequestManager<M>,
     state_identifier: M::StateIdentifier,
 ) -> RequestResult<M::StateValue> {
-    await!(request_manager.request(
+    request_manager.request(
         RequestKind::StateRetrieval(state_identifier),
         |result| {
             match result {
@@ -53,7 +53,7 @@ pub async fn retrieve<M: MachineCore>(
                 _ => Err(RequestError::StateRetrieval(Backtrace::new())),
             }
         },
-    ))
+    ).await
 }
 
 pub fn broadcast<M: MachineCore>(
