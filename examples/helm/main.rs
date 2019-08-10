@@ -1,4 +1,4 @@
-#![feature(async_await, await_macro, gen_future, decl_macro, proc_macro_hygiene)]
+#![feature(async_await, gen_future, decl_macro, proc_macro_hygiene)]
 
 use simple_raft_node::transports::TcpConnectionManager;
 use simple_raft_node::machines::HashMapMachine;

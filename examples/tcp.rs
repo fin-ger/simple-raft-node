@@ -1,4 +1,4 @@
-#![feature(async_await, await_macro)]
+#![feature(async_await)]
 
 use simple_raft_node::transports::TcpConnectionManager;
 use simple_raft_node::machines::HashMapMachine;
@@ -15,11 +15,7 @@ async fn main() {
 
     let nodes: Vec<Node<HashMapMachine<i64, String>>> = (1..6)
         .map(|node_id| {
-            let gateway = if node_id != 1 {
-                Some("127.0.0.1:8081".parse::<SocketAddr>().unwrap())
-            } else {
-                None
-            };
+            let gateway = "127.0.0.1:8081".parse::<SocketAddr>().unwrap();
             let address = format!("127.0.0.1:{}", 8080 + node_id)
                 .parse::<SocketAddr>()
                 .unwrap();
@@ -53,14 +49,14 @@ async fn main() {
         handles.push(runtime::spawn(async move {
             let content = format!("hello, world {}", i);
             log::info!("Inserting [{}, {}]...", i, content);
-            let result = await!(machine.put(i, content.clone()));
+            let result = machine.put(i, content.clone()).await;
             log::info!("[{}, {}] has been inserted", i, content);
             result
         }));
     }
 
     for handle in handles.drain(..) {
-        await!(handle).unwrap();
+        handle.await.unwrap();
     }
 
     log::info!("State changes were successful");
@@ -72,12 +68,12 @@ async fn main() {
             .map(|i| {
                 let machine = node.machine().clone();
                 runtime::spawn(async move {
-                    (i, await!(machine.get(i)).ok())
+                    (i, machine.get(i).await.ok())
                 })
             }).collect();
         log::info!("node {} {{", id);
         for handle in handles {
-            let (key, value) = await!(handle);
+            let (key, value) = handle.await;
             log::info!("  {}: {:?}", key, value);
         }
         log::info!("}}");
