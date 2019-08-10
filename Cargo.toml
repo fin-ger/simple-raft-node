@@ -16,10 +16,11 @@ crossbeam = "~0"
 get_if_addrs = "~0"
 rmp-serde = "~0"
 runtime = "0.3.0-alpha.6"
+futures-preview = "=0.3.0-alpha.17"
 
 [dev-dependencies]
 env_logger = "~0"
-runtime = "0.3.0-alpha.4"
+runtime = "0.3.0-alpha.6"
 rocket = "~0"
 ctrlc = { version = "~3", features = ["termination"] }
-futures-preview = "0.3.0-alpha.16"
+futures-preview = "0.3.0-alpha.17"
