@@ -13,7 +13,6 @@ use raft::eraftpb::{
     ConfChangeType,
     Snapshot,
     HardState,
-    ConfState,
 };
 
 use crate::{
@@ -165,7 +164,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
             })?;
         let wrapped_storage = WrappedStorage::new(storage);
 
-        let raft_node = RawNode::new(&base_config, wrapped_storage)
+        let raft_node = RawNode::new(&base_config, wrapped_storage, &raft::default_logger())
             .map_err(|e| NodeError::Raft {
                 node_id: base_config.id,
                 cause: e,
@@ -385,7 +384,7 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                         let mut transport = self.new_transports.remove(i);
 
                         let conf_state = self.raft_node
-                            .get_store()
+                            .store()
                             .readable()
                             .snapshot_metadata()
                             .get_conf_state();
@@ -820,12 +819,11 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
                             backtrace: Backtrace::new(),
                         })?;
 
-                        let cs = ConfState::from(
-                            self.raft_node
-                                .raft.prs()
-                                .configuration()
-                                .clone()
-                        );
+                        let cs = self.raft_node
+                            .raft.prs()
+                            .configuration()
+                            .to_conf_state();
+
                         log::debug!(
                             "writing new conf-state from conf-change to storage on node {}...",
                             self.id,

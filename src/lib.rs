@@ -3,7 +3,6 @@
     drain_filter,
     trait_alias,
     fn_traits,
-    async_await,
 )]
 
 /* Hello, dear reader of this source code.
