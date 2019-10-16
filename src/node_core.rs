@@ -2,6 +2,7 @@ use std::collections::{HashMap};
 use std::time::{Duration, Instant};
 use std::task::Waker;
 use std::thread;
+use std::sync::Mutex;
 
 use failure::Backtrace;
 use crossbeam::channel::{Receiver, Sender};
@@ -166,13 +167,12 @@ impl<M: MachineCore, C: ConnectionManager<M>, S: Storage> NodeCore<M, C, S> {
         let wrapped_storage = WrappedStorage::new(storage);
 
         let decorator = slog_term::TermDecorator::new().build();
-        let drain = slog_term::FullFormat::new(decorator).build().fuse();
-        let drain = slog_async::Async::new(drain)
-            .chan_size(4096)
-            .overflow_strategy(slog_async::OverflowStrategy::Block)
-            .build()
-            .fuse();
-        let logger = slog::Logger::root(drain, slog::o!("tag" => format!("[{}]", base_config.id)));
+        let drain = slog_term::CompactFormat::new(decorator).build();
+        let drain = slog_envlogger::new(drain);
+        let logger = slog::Logger::root(
+            Mutex::new(drain).fuse(),
+            slog::o!("tag" => format!("[{}]", base_config.id)),
+        );
 
         let raft_node = RawNode::new(&base_config, wrapped_storage, &logger)
             .map_err(|e| NodeError::Raft {
