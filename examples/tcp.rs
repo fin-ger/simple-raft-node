@@ -1,5 +1,3 @@
-#![feature(async_await)]
-
 use simple_raft_node::transports::TcpConnectionManager;
 use simple_raft_node::machines::HashMapMachine;
 use simple_raft_node::storages::MemStorage;
@@ -21,7 +19,6 @@ async fn main() {
                 .unwrap();
             let config = Config {
                 id: node_id,
-                tag: format!("node_{}", node_id),
                 election_tick: 10,
                 heartbeat_tick: 3,
                 ..Default::default()

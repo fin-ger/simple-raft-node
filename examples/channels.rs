@@ -1,5 +1,3 @@
-#![feature(async_await)]
-
 use simple_raft_node::transports::MpscChannelConnectionManager;
 use simple_raft_node::machines::HashMapMachine;
 use simple_raft_node::storages::MemStorage;
@@ -16,7 +14,6 @@ async fn main() {
         .map(|mgr| {
             let config = Config {
                 id: mgr.listener_addr(),
-                tag: format!("node_{}", mgr.listener_addr()),
                 election_tick: 10,
                 heartbeat_tick: 3,
                 ..Default::default()

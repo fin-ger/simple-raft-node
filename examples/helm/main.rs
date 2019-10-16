@@ -1,4 +1,4 @@
-#![feature(async_await, gen_future, decl_macro, proc_macro_hygiene)]
+#![feature(gen_future, decl_macro, proc_macro_hygiene)]
 
 use simple_raft_node::transports::TcpConnectionManager;
 use simple_raft_node::machines::HashMapMachine;
@@ -115,7 +115,6 @@ async fn main() {
 
     let config = Config {
         id: node_id,
-        tag: format!("node_{}", node_id),
         election_tick: 10,
         heartbeat_tick: 3,
         ..Default::default()
