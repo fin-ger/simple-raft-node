@@ -48,8 +48,8 @@ For now, read the source to get started. This readme will be helpful later on :n
 **Fin Christensen**
 
 > [:octocat: `@fin-ger`](https://github.com/fin-ger)  
-> [:elephant: `@fin_ger@mastodon.social`](https://mastodon.social/web/accounts/787945)  
-> [:bird: `@fin_ger_github`](https://twitter.com/fin_ger_github)  
+> [:elephant: `@fin_ger@weirder.earth`](https://weirder.earth/@fin_ger)  
+> [:bird: `@fin_ger_github`](https://twitter.com/fin_ger_github)   
 
 ## Show your support
 
